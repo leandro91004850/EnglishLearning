@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/text.dart';
@@ -5,7 +6,8 @@ import '../../data/history.dart';
 import '../../youtube/video_id.dart';
 
 /// Os vídeos recentes. Tocar abre o vídeo (ele fica no lugar dele na lista);
-/// as setas sobem ou descem o vídeo; o × tira da lista.
+/// tocar e segurar levanta o vídeo, que pode ser arrastado para cima ou para
+/// baixo (no lugar das setas do app.py); o × tira da lista.
 class HistoryList extends StatelessWidget {
   const HistoryList({
     super.key,
@@ -39,19 +41,70 @@ class HistoryList extends StatelessWidget {
             ),
           );
         }
-        return ListView.separated(
-          padding: const EdgeInsets.symmetric(vertical: 6),
+        return ReorderableListView.builder(
+          padding: const EdgeInsets.only(bottom: 6),
+          // segurar em qualquer ponto do vídeo começa o arraste (também no computador)
+          buildDefaultDragHandles: false,
+          header: items.length > 1
+              ? Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+                  child: Row(
+                    children: [
+                      Icon(Icons.swap_vert, size: 16, color: theme.colorScheme.onSurfaceVariant),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Toque e segure um vídeo para arrastar e mudar a ordem.',
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : const SizedBox(height: 6),
           itemCount: items.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 2),
-          itemBuilder: (context, i) => _HistoryTile(
-            item: items[i],
-            current: items[i].id == currentId,
-            canUp: i > 0,
-            canDown: i < items.length - 1,
-            onOpen: () => onOpen(items[i]),
-            onUp: () => history.move(items[i].id, -1),
-            onDown: () => history.move(items[i].id, 1),
-            onRemove: () => onRemove(items[i]),
+          onReorderStart: (_) => HapticFeedback.mediumImpact(),
+          onReorderEnd: (_) => HapticFeedback.selectionClick(),
+          onReorderItem: history.reorder,
+          proxyDecorator: _lifted,
+          itemBuilder: (context, i) {
+            final item = items[i];
+            return ReorderableDelayedDragStartListener(
+              key: ValueKey(item.id),
+              index: i,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: _HistoryTile(
+                  item: item,
+                  current: item.id == currentId,
+                  onOpen: () => onOpen(item),
+                  onRemove: () => onRemove(item),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// O vídeo que está sendo arrastado fica "levantado" sobre os outros.
+  static Widget _lifted(Widget child, int index, Animation<double> animation) {
+    return AnimatedBuilder(
+      animation: animation,
+      child: child,
+      builder: (context, child) {
+        final t = Curves.easeOut.transform(animation.value);
+        final scheme = Theme.of(context).colorScheme;
+        return Transform.scale(
+          scale: 1 + 0.03 * t,
+          child: Material(
+            elevation: 10 * t,
+            shadowColor: Colors.black,
+            color: Color.lerp(scheme.surface, scheme.surfaceContainerHighest, t),
+            borderRadius: BorderRadius.circular(10),
+            clipBehavior: Clip.antiAlias,
+            child: child,
           ),
         );
       },
@@ -75,21 +128,13 @@ class _HistoryTile extends StatelessWidget {
   const _HistoryTile({
     required this.item,
     required this.current,
-    required this.canUp,
-    required this.canDown,
     required this.onOpen,
-    required this.onUp,
-    required this.onDown,
     required this.onRemove,
   });
 
   final HistoryItem item;
   final bool current;
-  final bool canUp;
-  final bool canDown;
   final VoidCallback onOpen;
-  final VoidCallback onUp;
-  final VoidCallback onDown;
   final VoidCallback onRemove;
 
   @override
@@ -158,23 +203,6 @@ class _HistoryTile extends StatelessWidget {
                     if (where.isNotEmpty) Text(where, style: small),
                   ],
                 ),
-              ),
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    visualDensity: compact,
-                    tooltip: 'Subir na lista',
-                    onPressed: canUp ? onUp : null,
-                    icon: const Icon(Icons.keyboard_arrow_up),
-                  ),
-                  IconButton(
-                    visualDensity: compact,
-                    tooltip: 'Descer na lista',
-                    onPressed: canDown ? onDown : null,
-                    icon: const Icon(Icons.keyboard_arrow_down),
-                  ),
-                ],
               ),
               IconButton(
                 visualDensity: compact,

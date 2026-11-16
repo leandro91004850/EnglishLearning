@@ -36,6 +36,9 @@ O que muda em relação ao app.py:
 
 - As traduções terminadas também ficam em disco (`cache/`), não só na memória:
   no celular o sistema fecha o app com frequência, e cada tradução gasta a cota do Google.
+- Recentes: tocar e segurar um vídeo e arrastar para cima ou para baixo muda a ordem
+  (no lugar das setas do app.py). Quando um vídeo termina, o app segue para o de baixo —
+  só se o vídeo chegou mesmo ao fim (o player às vezes avisa "terminou" antes da hora).
 - Controles de estudo: fala anterior / repetir / próxima, velocidade e tela cheia.
   No computador: espaço, ← →, R, F, + e −.
 - A legenda automática do próprio YouTube é desligada ao abrir o vídeo (o app já mostra a dele);

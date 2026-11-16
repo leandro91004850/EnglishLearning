@@ -73,7 +73,7 @@ class _TranscriptListState extends State<TranscriptList> {
     _scrollTo(i, animate: true);
   }
 
-  void _scrollTo(int index, {required bool animate, int attempts = 3}) {
+  void _scrollTo(int index, {required bool animate, int attempts = 12}) {
     if (!mounted) return;
     if (!_scroll.hasClients) {
       // as falas acabaram de chegar e a lista ainda não foi montada
@@ -95,11 +95,24 @@ class _TranscriptListState extends State<TranscriptList> {
       return;
     }
     if (attempts == 0) return;
-    // a fala ainda não foi montada: pula para uma estimativa e tenta de novo
+    // A fala ainda não foi montada. As linhas têm alturas diferentes, então uma
+    // estimativa só pelo índice erra longe: anda a partir das falas que estão
+    // montadas agora, na direção da desejada, e confere de novo no próximo quadro.
     final position = _scroll.position;
-    final target = (index * _averageRowHeight() - position.viewportDimension * 0.3)
-        .clamp(0.0, position.maxScrollExtent);
-    _scroll.jumpTo(target);
+    final built = [
+      for (final MapEntry(key: i, value: ctx) in _rows.entries)
+        if (ctx.mounted) i,
+    ]..sort();
+    final avg = _averageRowHeight();
+    final double target;
+    if (built.isEmpty) {
+      target = index * avg - position.viewportDimension * 0.3;
+    } else if (index > built.last) {
+      target = position.pixels + (index - built.last) * avg + position.viewportDimension * 0.5;
+    } else {
+      target = position.pixels - (built.first - index) * avg - position.viewportDimension * 0.5;
+    }
+    _scroll.jumpTo(target.clamp(position.minScrollExtent, position.maxScrollExtent));
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _scrollTo(index, animate: false, attempts: attempts - 1),
     );

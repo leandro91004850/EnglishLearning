@@ -156,10 +156,16 @@ class History extends ChangeNotifier {
   /// Devolve true se ele mudou de lugar.
   bool move(String videoId, int delta) {
     final i = indexOf(videoId);
-    if (i < 0) return false;
-    final j = (i + delta).clamp(0, _items.length - 1);
-    if (j == i) return false;
-    _items.insert(j, _items.removeAt(i));
+    return i >= 0 && reorder(i, i + delta);
+  }
+
+  /// Leva o vídeo da posição [from] para a posição [to] (arrastando na lista),
+  /// sem mudar o `at`. Devolve true se ele mudou de lugar.
+  bool reorder(int from, int to) {
+    if (from < 0 || from >= _items.length) return false;
+    final j = to.clamp(0, _items.length - 1);
+    if (j == from) return false;
+    _items.insert(j, _items.removeAt(from));
     _dirty = true;
     save();
     notifyListeners();

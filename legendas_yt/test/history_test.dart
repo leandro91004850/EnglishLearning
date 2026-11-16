@@ -57,6 +57,26 @@ void main() {
     expect(ids(h).last, 'bbbbbbbbbbb');
   });
 
+  test('arrastar na lista: leva o vídeo para qualquer posição e grava', () {
+    final h = history();
+    for (final id in ['ddddddddddd', 'ccccccccccc', 'bbbbbbbbbbb', 'aaaaaaaaaaa']) {
+      h.opened(id, 'auto');
+    }
+    expect(ids(h), ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd']);
+
+    expect(h.reorder(0, 3), isTrue); // o primeiro vai para o fim
+    expect(ids(h), ['bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd', 'aaaaaaaaaaa']);
+    expect(h.reorder(3, 1), isTrue); // e volta para o segundo lugar
+    expect(ids(h), ['bbbbbbbbbbb', 'aaaaaaaaaaa', 'ccccccccccc', 'ddddddddddd']);
+    expect(h.reorder(2, 99), isTrue); // além do fim: fica no fim
+    expect(ids(h).last, 'ccccccccccc');
+
+    expect(h.reorder(1, 1), isFalse);
+    expect(h.reorder(-1, 0), isFalse);
+    expect(h.reorder(9, 0), isFalse);
+    expect(ids(History(file())), ids(h)); // já gravou
+  });
+
   test('posição: grava no máximo a cada 15 s, e na hora quando forçado', () {
     final h = history();
     h.opened('aaaaaaaaaaa', 'auto');
