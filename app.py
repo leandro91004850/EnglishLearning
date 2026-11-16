@@ -1,0 +1,678 @@
+"""
+Legendas YT — tradução em tempo real de legendas do YouTube (Português <> Inglês).
+
+Abre o vídeo dentro do app, baixa a legenda original do YouTube e mostra,
+sincronizada com o vídeo, a linha original + a tradução.
+
+Uso:
+    python app.py                       # reabre o último vídeo assistido (ou o app vazio)
+    python app.py "https://youtu.be/…"  # já abre com o vídeo
+    python app.py --diagnostico [link]  # testa tradutores e legendas, sem abrir janela
+"""
+from __future__ import annotations
+
+import functools
+import json
+import logging
+import os
+import re
+import socket
+import sys
+import tempfile
+import threading
+import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import quote
+
+import requests
+from youtube_transcript_api import (
+    AgeRestricted,
+    IpBlocked,
+    NoTranscriptFound,
+    RequestBlocked,
+    TranscriptsDisabled,
+    VideoUnavailable,
+    YouTubeTranscriptApi,
+)
+
+from tradutor import ENGINES, MYMEMORY_DAILY_CHARS, RESERVE, RateLimited, TranslateError, Translator
+
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+UI_DIR = BASE_DIR / "ui"
+PREFERRED_PORT = 8765      # porta preferida da interface (se estiver ocupada, usa outra)
+# Tamanho mínimo da janela. Abaixo de uns 720×460 a interface esconde o menu e a lista de falas
+# e mostra só o vídeo (ui/index.html, @media no fim do <style>).
+MIN_WINDOW = (320, 200)
+CHUNK_CHARS = 1200         # tamanho de cada lote enviado ao tradutor
+CHUNK_LINES = 40
+RETRY_WAITS = (5, 15, 30)  # novas tentativas para lotes que falharam (segundos)
+
+log = logging.getLogger("legendas")
+
+
+def setup_logging() -> Path:
+    folder = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+    path = folder / "legendas-yt.log"
+    try:
+        handler = logging.FileHandler(path, encoding="utf-8")
+    except OSError:
+        path = Path(tempfile.gettempdir()) / "legendas-yt.log"
+        handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    if sys.stderr:
+        log.addHandler(logging.StreamHandler())
+    log.setLevel(logging.INFO)
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# Legendas
+# --------------------------------------------------------------------------- #
+class TimeoutSession(requests.Session):
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", (6, 20))
+        return super().request(*args, **kwargs)
+
+
+def transcript_api() -> YouTubeTranscriptApi:
+    return YouTubeTranscriptApi(http_client=TimeoutSession())
+
+
+def extract_video_id(text: str) -> str | None:
+    text = (text or "").strip()
+    if re.fullmatch(r"[\w-]{11}", text):
+        return text
+    m = re.search(r"(?:[?&]v=|youtu\.be/|/shorts/|/embed/|/live/)([\w-]{11})", text)
+    return m.group(1) if m else None
+
+
+def lang_family(code: str) -> str:
+    return code.split("-")[0].lower()
+
+
+def target_for(source_code: str) -> str:
+    """Inglês -> português; português -> inglês; qualquer outra -> português."""
+    return "en" if lang_family(source_code) == "pt" else "pt"
+
+
+def pick_transcript(tracks, source: str):
+    """
+    Escolhe a melhor faixa de legenda.
+    source = "auto" | "en" | "pt"
+      auto: prefere legenda feita por humanos (EN ou PT) à gerada automaticamente.
+      en/pt: prefere esse idioma, mesmo que seja gerado automaticamente.
+    """
+    tracks = list(tracks)
+    if not tracks:
+        raise NoTranscriptFound("", [], None)
+    order = ["pt", "en"] if source == "pt" else ["en", "pt"]
+
+    def score(t):
+        fam = lang_family(t.language_code)
+        rank = order.index(fam) if fam in order else len(order)
+        if source == "auto":
+            return (rank == len(order), t.is_generated, rank)
+        return (rank, t.is_generated)
+
+    return min(tracks, key=score)
+
+
+def clean(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def language_name(track) -> str:
+    """'English (auto-generated)' -> 'English'."""
+    return re.sub(r"\s*\(.*?\)\s*$", "", track.language).strip() or track.language_code
+
+
+def make_chunks(items):
+    """Agrupa [(índice, texto), ...] em lotes de até CHUNK_CHARS caracteres / CHUNK_LINES falas."""
+    chunks, cur, size = [], [], 0
+    for idx, text in items:
+        if cur and (size + len(text) + 1 > CHUNK_CHARS or len(cur) >= CHUNK_LINES):
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append((idx, text))
+        size += len(text) + 1
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def friendly_error(exc: Exception) -> str:
+    if isinstance(exc, TranscriptsDisabled):
+        return "Este vídeo não tem legendas (nem automáticas)."
+    if isinstance(exc, NoTranscriptFound):
+        return "Nenhuma legenda encontrada para este vídeo."
+    if isinstance(exc, VideoUnavailable):
+        return "Vídeo indisponível."
+    if isinstance(exc, AgeRestricted):
+        return "Vídeo com restrição de idade: legendas inacessíveis sem login."
+    if isinstance(exc, (RequestBlocked, IpBlocked)):
+        return "O YouTube bloqueou temporariamente as requisições deste IP. Tente mais tarde."
+    return f"Erro ao buscar legendas: {type(exc).__name__}"
+
+
+# --------------------------------------------------------------------------- #
+# Dados que sobrevivem ao fechar o app: histórico dos últimos vídeos (com o ponto
+# onde cada um parou) e preferências da interface. Ficam em arquivos no perfil do
+# usuário: o WebView roda em modo privado (padrão do pywebview) e apaga o
+# localStorage quando o app fecha.
+# --------------------------------------------------------------------------- #
+HISTORY_LIMIT = 30
+HISTORY_SAVE_EVERY = 15  # segundos entre gravações da posição do vídeo
+PREF_KEYS = ("subSize", "show")  # tamanho da legenda; o que mostrar sobre o vídeo
+
+
+def data_dir() -> Path:
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming"
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(base) / "LegendasYT"
+
+
+def read_json(path: Path, default):
+    """Conteúdo do arquivo, ou `default` se ele não existir, estiver estragado ou for de outro tipo."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as e:
+        log.warning("Arquivo ilegível (%s): %r", path, e)
+        return default
+    return data if isinstance(data, type(default)) else default
+
+
+def write_json(path: Path, data) -> bool:
+    """Grava sem deixar arquivo pela metade (escreve num temporário e troca)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError as e:
+        log.warning("Não consegui gravar %s: %r", path, e)
+        return False
+
+
+class Prefs:
+    """Preferências da interface: {subSize: int, show: "both" | "tr" | "orig"}."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._data = {k: v for k, v in read_json(path, {}).items() if k in PREF_KEYS}
+
+    def all(self) -> dict:
+        with self._lock:
+            return dict(self._data)
+
+    def set(self, key: str, value) -> None:
+        if key not in PREF_KEYS or isinstance(value, bool) or not isinstance(value, (int, str)):
+            return
+        with self._lock:
+            if self._data.get(key) != value:
+                self._data[key] = value
+                write_json(self.path, self._data)
+
+
+class History:
+    """Lista de vídeos recentes: {id, url, source, at, title, author, pos, dur}.
+    Link novo entra no topo; vídeo aberto pela própria lista fica no lugar, para que, quando ele
+    termina, o app siga para o de baixo. As setas da lista sobem ou descem um vídeo (move).
+    `at` diz quando cada um foi aberto pela última vez."""
+
+    def __init__(self, path: Path, limit: int = HISTORY_LIMIT):
+        self.path, self.limit = path, limit
+        self._lock = threading.Lock()
+        self._items = self._read()
+        self._dirty, self._saved_at = False, 0.0
+
+    def _read(self) -> list[dict]:
+        data = read_json(self.path, [])
+        ok = [x for x in data if isinstance(x, dict) and re.fullmatch(r"[\w-]{11}", str(x.get("id", "")))]
+        return ok[: self.limit]
+
+    def items(self) -> list[dict]:
+        with self._lock:
+            return [dict(x) for x in self._items]
+
+    def opened(self, vid: str, source: str, keep_place: bool = False) -> bool:
+        """Vídeo aberto agora. Sem keep_place (link colado), vai para o topo; com keep_place (aberto
+        pela lista, ou o mesmo vídeo de novo), fica onde está e, se tinha saído da lista, não volta.
+        Devolve True se ainda não tem título."""
+        with self._lock:
+            item = next((x for x in self._items if x["id"] == vid), None)
+            if item is None and keep_place:
+                return False
+            if item is None:
+                item = {"id": vid}
+                self._items.insert(0, item)
+            elif not keep_place:
+                self._items.remove(item)
+                self._items.insert(0, item)
+            item.update(url=f"https://www.youtube.com/watch?v={vid}", source=source, at=int(time.time()))
+            del self._items[self.limit:]
+            self._dirty = True
+            need_title = not item.get("title")
+        self.save()
+        return need_title
+
+    def remove(self, vid: str) -> bool:
+        """Tira o vídeo da lista. Devolve True se ele estava lá."""
+        with self._lock:
+            left = [x for x in self._items if x["id"] != vid]
+            if len(left) == len(self._items):
+                return False
+            self._items, self._dirty = left, True
+        self.save()
+        return True
+
+    def move(self, vid: str, delta: int) -> bool:
+        """Sobe (delta < 0) ou desce (delta > 0) o vídeo na lista, sem mudar o `at`.
+        Devolve True se ele mudou de lugar."""
+        with self._lock:
+            i = next((n for n, x in enumerate(self._items) if x["id"] == vid), None)
+            if i is None:
+                return False
+            j = max(0, min(len(self._items) - 1, i + delta))
+            if j == i:
+                return False
+            self._items.insert(j, self._items.pop(i))
+            self._dirty = True
+        self.save()
+        return True
+
+    def update(self, vid: str, **fields) -> None:
+        """Atualiza título ou posição de um vídeo, sem mudar a ordem."""
+        with self._lock:
+            item = next((x for x in self._items if x["id"] == vid), None)
+            if item is not None:
+                item.update(fields)
+                self._dirty = True
+
+    def save(self, force: bool = True) -> None:
+        """Grava se algo mudou; com force=False, no máximo a cada HISTORY_SAVE_EVERY segundos."""
+        with self._lock:
+            if not self._dirty or (not force and time.time() - self._saved_at < HISTORY_SAVE_EVERY):
+                return
+            if write_json(self.path, self._items):
+                self._dirty, self._saved_at = False, time.time()
+
+
+def video_title(vid: str) -> tuple[str, str]:
+    """Título e canal do vídeo (oEmbed do YouTube); ('', '') se não der."""
+    try:
+        r = requests.get("https://www.youtube.com/oembed", timeout=(6, 10),
+                         params={"url": f"https://www.youtube.com/watch?v={vid}", "format": "json"})
+        if r.ok:
+            d = r.json()
+            return clean(d.get("title")), clean(d.get("author_name"))
+    except (requests.RequestException, ValueError):
+        pass
+    return "", ""
+
+
+# --------------------------------------------------------------------------- #
+# Ponte Python <-> interface
+# --------------------------------------------------------------------------- #
+class Api:
+    def __init__(self, log_path: Path | None = None, history: History | None = None,
+                 prefs: Prefs | None = None):
+        self._window = None
+        self._job = 0
+        self._focus = 0
+        self._vid = None  # vídeo aberto por último
+        self._lock = threading.Lock()
+        self._cache: dict[tuple[str, str], tuple[dict, list, str]] = {}
+        self._log_name = log_path.name if log_path else "legendas-yt.log"
+        # privados: o pywebview expõe ao JavaScript todo atributo público
+        self._history = history or History(data_dir() / "historico.json")
+        self._prefs = prefs or Prefs(data_dir() / "preferencias.json")
+
+    # ---- chamados pelo JavaScript ----
+    def load(self, url, source="auto", keep_place=False):
+        """keep_place: o vídeo foi aberto pela lista de recentes e fica no lugar dele."""
+        vid = extract_video_id(url)
+        if not vid:
+            return {"ok": False, "error": "Link do YouTube inválido."}
+        with self._lock:
+            self._job += 1
+            job = self._job
+            self._focus = 0
+            # o mesmo vídeo de novo (trocou o idioma, nova tentativa) também não muda de lugar
+            keep_place = bool(keep_place) or vid == self._vid
+            self._vid = vid
+        threading.Thread(target=self._work, args=(job, vid, source), daemon=True).start()
+        if self._history.opened(vid, source, keep_place):
+            threading.Thread(target=self._fetch_title, args=(vid,), daemon=True).start()
+        return {"ok": True, "videoId": vid, "job": job}
+
+    def history(self):
+        """Lista de vídeos recentes, na ordem em que aparece."""
+        return self._history.items()
+
+    def remove_from_history(self, video_id):
+        """Tira um vídeo da lista de recentes."""
+        if extract_video_id(str(video_id)) == video_id:
+            self._history.remove(video_id)
+
+    def move_in_history(self, video_id, delta):
+        """Sobe (-1) ou desce (+1) um vídeo na lista de recentes."""
+        if extract_video_id(str(video_id)) == video_id and delta in (-1, 1):
+            self._history.move(video_id, int(delta))
+
+    def progress(self, video_id, seconds, duration):
+        """A interface avisa onde o vídeo está, para retomar dali depois."""
+        try:
+            pos, dur = float(seconds), float(duration)
+        except (TypeError, ValueError):
+            return
+        if extract_video_id(str(video_id)) == video_id and 0 <= pos < 1e7 and 0 <= dur < 1e7:
+            self._history.update(video_id, pos=round(pos, 1), dur=round(dur, 1))
+            self._history.save(force=False)
+
+    def prefs(self):
+        """Preferências salvas da interface (tamanho da legenda, o que mostrar)."""
+        return self._prefs.all()
+
+    def set_pref(self, key, value):
+        self._prefs.set(key, value)
+
+    def focus(self, job, index):
+        """A interface avisa onde o vídeo está, para traduzir esse trecho primeiro."""
+        if job == self._job:
+            self._focus = int(index)
+
+    def toggle_fullscreen(self):
+        self._window.toggle_fullscreen()
+
+    # ---- internos ----
+    def _fetch_title(self, vid):
+        title, author = video_title(vid)
+        if title:
+            self._history.update(vid, title=title, author=author)
+            self._history.save()
+
+    def _alive(self, job):
+        return job == self._job
+
+    def _js(self, fn, *args):
+        if self._window:
+            payload = ", ".join(json.dumps(a, ensure_ascii=True) for a in args)
+            self._window.evaluate_js(f"window.app && window.app.{fn}({payload})")
+
+    def _sleep(self, job, seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            if not self._alive(job):
+                return False
+            time.sleep(0.25)
+        return self._alive(job)
+
+    def _wait_block(self, job, until, fallback=""):
+        """O Google bloqueou (HTTP 429) e a reserva não deu conta (`fallback` diz por quê):
+        espera sem mandar pedidos e mostra quando tenta o Google de novo."""
+        while True:
+            left = until - time.time()
+            if left <= 0:
+                return self._alive(job)
+            when = time.strftime("%H:%M", time.localtime(until))
+            mins = "menos de 1 min" if left < 60 else f"{int((left + 59) // 60)} min"
+            reserve = f" {fallback}." if fallback else ""
+            self._js("setStatus", job,
+                     "O Google bloqueou temporariamente as traduções por excesso de pedidos (HTTP 429)."
+                     f"{reserve} Nova tentativa no Google às {when} (em {mins}); a tradução continua sozinha.",
+                     True)
+            if not self._sleep(job, min(left, 15)):
+                return False
+
+    def _next_chunk(self, pending, chunks):
+        after = [c for c in pending if chunks[c][-1][0] >= self._focus]
+        return min(after) if after else min(pending)
+
+    def _work(self, job, vid, source):
+        key = (vid, source)
+        if key in self._cache:
+            meta, translations, done_msg = self._cache[key]
+            self._js("onTranscript", job, meta)
+            self._js("onTranslations", job, translations)
+            self._js("setStatus", job, done_msg)
+            return
+
+        # 1) legenda original
+        try:
+            self._js("setStatus", job, "Buscando legendas…")
+            track = pick_transcript(transcript_api().list(vid), source)
+            cues = [
+                {"start": s.start, "dur": s.duration, "text": clean(s.text)}
+                for s in track.fetch()
+            ]
+        except Exception as exc:
+            log.warning("Legendas de %s: %r", vid, exc)
+            if self._alive(job):
+                self._js("setStatus", job, friendly_error(exc), True)
+            return
+        if not self._alive(job):
+            return
+
+        src_code = lang_family(track.language_code)
+        tgt = target_for(track.language_code)
+        meta = {
+            "cues": cues,
+            "sourceName": language_name(track),
+            "sourceCode": track.language_code,
+            "generated": track.is_generated,
+            "target": tgt,
+            "targetName": "Português" if tgt == "pt" else "English",
+        }
+        log.info("Vídeo %s: %d falas em %s (%s) -> %s",
+                 vid, len(cues), track.language_code, "auto" if track.is_generated else "manual", tgt)
+        self._js("onTranscript", job, meta)
+        self._js("setStatus", job, f"Traduzindo para {meta['targetName']}…")
+
+        # 2) tradução em lotes, começando pelo trecho onde o vídeo está
+        items = [(i, c["text"]) for i, c in enumerate(cues) if c["text"]]
+        chunks = make_chunks(items)
+        translator = Translator(src_code if src_code in ("en", "pt") else "auto", tgt, track.language_code)
+        collected, pending, last_error = [], list(range(len(chunks))), ""
+
+        for wait in (0, *RETRY_WAITS):
+            if not pending:
+                break
+            if wait:
+                self._js("setStatus", job, f"{last_error} — tentando de novo em {wait} s…", True)
+                if not self._sleep(job, wait):
+                    return
+            failed, streak = [], 0
+            while pending:
+                if not self._alive(job):
+                    return
+                cid = self._next_chunk(pending, chunks)
+                pending.remove(cid)
+                chunk = chunks[cid]
+                try:
+                    out = translator.translate([t for _, t in chunk])
+                except RateLimited as e:  # o Google bloqueou e a reserva não deu conta: espera e retoma sozinho
+                    pending.append(cid)
+                    if not self._wait_block(job, e.until, e.fallback):
+                        return
+                    continue
+                except TranslateError as e:
+                    last_error = str(e)
+                    failed.append(cid)
+                    streak += 1
+                    self._js("setStatus", job, f"Falha ao traduzir: {e}", True)
+                    if streak >= 2:  # serviço fora do ar: espera um pouco antes de insistir
+                        failed += pending
+                        pending = []
+                    continue
+                streak = 0
+                pairs = [[idx, t] for (idx, _), t in zip(chunk, out)]
+                collected.extend(pairs)
+                if self._alive(job):
+                    self._js("onTranslations", job, pairs)
+                    if translator.last == "MyMemory":  # a interface acabou de pôr "Traduzindo… N%"
+                        why = ("o Google bloqueou temporariamente" if translator.google_blocked
+                               else "o Google falhou")
+                        daily = f"{MYMEMORY_DAILY_CHARS:,}".replace(",", ".")
+                        self._js("setStatus", job,
+                                 f"Traduzindo pelo MyMemory (reserva, até {daily} caracteres por dia), "
+                                 f"porque {why}… {round(100 * len(collected) / len(items))}%")
+            pending = failed
+
+        if not self._alive(job):
+            return
+        if pending:
+            missing = sum(len(chunks[c]) for c in pending)
+            msg = (f"{missing} falas ficaram sem tradução ({last_error}). "
+                   f"Clique em Abrir para tentar de novo. Detalhes em {self._log_name}")
+            log.warning(msg)
+            self._js("setStatus", job, msg, True)
+            return
+        engines = " + ".join(sorted(translator.used)) or "—"
+        done_msg = f"{meta['sourceName']} → {meta['targetName']} ✓ ({engines})"
+        self._cache[key] = (meta, collected, done_msg)
+        self._js("setStatus", job, done_msg)
+
+
+# --------------------------------------------------------------------------- #
+# Diagnóstico (python app.py --diagnostico [link])
+# --------------------------------------------------------------------------- #
+def diagnose(url: str | None) -> int:
+    print("Legendas YT — diagnóstico\n")
+    samples = ["Hello, how are you?", "I started listening more.", "Do you understand English but feel"]
+    def check(name, fn):
+        """Traduz as amostras; devolve (deu certo?, hora até quando o Google bloqueia ou None)."""
+        t0 = time.time()
+        try:
+            out = fn(samples, "en", "pt")
+            print(f"[OK]    {name}, {time.time() - t0:.1f} s: {out}")
+            return True, None
+        except Exception as e:
+            print(f"[FALHA] {e}" if isinstance(e, TranslateError) else f"[FALHA] {name}: {e}")
+            return False, e.until if isinstance(e, RateLimited) else None
+
+    results = [check(name, fn) for name, fn in ENGINES.items()]  # os modos do Google, na ordem do app
+    blocked = max((until for _, until in results if until), default=None)
+    if blocked:
+        print(f"        O Google bloqueou temporariamente este IP por excesso de pedidos. Tente de novo depois das "
+              f"{time.strftime('%H:%M', time.localtime(blocked))}; enquanto isso o app usa a reserva "
+              "e depois volta ao Google sozinho.")
+    results += [check(name, fn) for name, fn in RESERVE.items()]
+    ok = sum(good for good, _ in results)
+    if url:
+        vid = extract_video_id(url)
+        try:
+            tracks = list(transcript_api().list(vid))
+            names = ", ".join(f"{t.language_code}{'(auto)' if t.is_generated else ''}" for t in tracks)
+            track = pick_transcript(tracks, "auto")
+            n = len(list(track.fetch()))
+            print(f"[OK]    Legendas do YouTube: {n} falas em {track.language_code} (disponíveis: {names})")
+        except Exception as e:
+            print(f"[FALHA] Legendas do YouTube: {friendly_error(e)} [{type(e).__name__}]")
+    daily = f"{MYMEMORY_DAILY_CHARS:,}".replace(",", ".")
+    print("\nPelo menos um tradutor precisa estar OK para o app traduzir. O MyMemory é só a reserva: "
+          f"até {daily} caracteres por dia sem cadastro (umas 200 falas), usados quando o Google falha.")
+    return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------- #
+# Servidor local
+# O player do YouTube exige página servida por http (não file://) e aberta por um
+# NOME, não por IP: com a página em 127.0.0.1 (ou [::1], 192.168.…) o YouTube
+# recusa alguns vídeos (ex.: VVHb0f-nx1Y, uma compilação de músicas) com "Este
+# vídeo não está disponível", mesmo com a incorporação liberada pelo dono.
+# Por isso a interface abre em http://localhost:PORTA.
+# "localhost" pode virar 127.0.0.1 ou ::1, então o servidor escuta nos dois.
+# --------------------------------------------------------------------------- #
+HOST = "localhost"
+
+
+class QuietHandler(SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+
+class LocalServer(ThreadingHTTPServer):
+    # No Windows, o SO_REUSEADDR que o http.server liga deixa outro programa (ex.: outra
+    # cópia do app) escutar na mesma porta e responder no lugar deste. Porta exclusiva.
+    allow_reuse_address = not hasattr(socket, "SO_EXCLUSIVEADDRUSE")
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class LocalServer6(LocalServer):
+    address_family = socket.AF_INET6
+
+
+def has_ipv6_loopback() -> bool:
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+def start_server() -> int:
+    handler = functools.partial(QuietHandler, directory=str(UI_DIR))
+    ipv6 = socket.has_ipv6 and has_ipv6_loopback()
+    for port in (PREFERRED_PORT, 0, 0, 0):
+        servers = []
+        try:
+            servers.append(LocalServer(("127.0.0.1", port), handler))
+            if ipv6:  # mesma porta no ::1, senão "localhost" pode cair em outro programa
+                servers.append(LocalServer6(("::1", servers[0].server_port), handler))
+        except OSError:  # porta ocupada: tenta outra
+            for s in servers:
+                s.server_close()
+            continue
+        for s in servers:
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        return servers[0].server_port
+    raise OSError("Não consegui abrir o servidor local da interface.")
+
+
+def main():
+    args = sys.argv[1:]
+    log_path = setup_logging()
+    if args and args[0] in ("--diagnostico", "--diagnóstico", "--diag"):
+        sys.exit(diagnose(args[1] if len(args) > 1 else None))
+
+    import webview  # importado aqui para o diagnóstico rodar mesmo sem o pywebview
+
+    port = start_server()
+    url = f"http://{HOST}:{port}/index.html"
+    if args:
+        url += "?u=" + quote(args[0], safe="")
+
+    api = Api(log_path)
+    window = webview.create_window(
+        "Legendas YT — PT ⇄ EN",
+        url,
+        js_api=api,
+        width=1280,
+        height=780,
+        min_size=MIN_WINDOW,
+        background_color="#0f0f10",
+    )
+    api._window = window
+    webview.start()
+    api._history.save()  # guarda onde o último vídeo parou
+
+
+if __name__ == "__main__":
+    main()
