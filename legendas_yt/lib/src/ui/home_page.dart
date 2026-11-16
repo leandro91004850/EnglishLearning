@@ -9,7 +9,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../app/services.dart';
 import '../app/session.dart';
 import '../core/cue.dart';
+import '../core/log.dart';
 import '../core/subtitles.dart';
+import '../core/text.dart';
 import '../data/history.dart';
 import '../data/prefs.dart';
 import '../youtube/video_id.dart';
@@ -86,7 +88,14 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (last != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          _open(last.link, source: last.source, keepPlace: true, autoplay: false, start: last.resumeAt);
+          _open(
+            last.link,
+            source: last.source,
+            keepPlace: true,
+            autoplay: false,
+            start: last.resumeAt,
+            why: 'último assistido, ao abrir o app',
+          );
         }
       });
     } else {
@@ -110,7 +119,15 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   // ---- vídeo e legenda ----
 
   /// Abre o link (ou ID). [keepPlace]: aberto pela lista de recentes.
-  void _open(String text, {String? source, bool keepPlace = false, bool autoplay = true, double? start}) {
+  /// [why] vai para o registro (de onde veio o pedido para abrir).
+  void _open(
+    String text, {
+    String? source,
+    bool keepPlace = false,
+    bool autoplay = true,
+    double? start,
+    String why = 'link',
+  }) {
     final src = normalizeSource(source ?? _source);
     final vid = extractVideoId(text);
     final saved = vid == null ? null : history.find(vid);
@@ -120,6 +137,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       return;
     }
     final id = result.videoId!;
+    Log.info('Abrindo $id ($why)');
     _focusSent = -1;
     setState(() => _source = src);
     if (_tabs.index != 0) _tabs.animateTo(0); // mostra as falas do vídeo
@@ -139,19 +157,19 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     _open(text);
   }
 
-  void _openItem(HistoryItem item) {
-    _open(item.link, source: item.source, keepPlace: true, start: item.resumeAt);
+  void _openItem(HistoryItem item, {String why = 'lista de recentes'}) {
+    _open(item.link, source: item.source, keepPlace: true, start: item.resumeAt, why: why);
   }
 
   void _retry() {
     final vid = session.videoId;
-    if (vid != null) _open(vid, source: _source, keepPlace: true);
+    if (vid != null) _open(vid, source: _source, keepPlace: true, why: 'tentar de novo');
   }
 
   void _changeSource(String value) {
     setState(() => _source = value);
     final vid = session.videoId;
-    if (vid != null) _open(vid, source: value, keepPlace: true);
+    if (vid != null) _open(vid, source: value, keepPlace: true, why: 'troca do idioma da legenda');
   }
 
   void _removeItem(HistoryItem item) {
@@ -189,14 +207,22 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   /// O vídeo terminou: segue para o de baixo na lista de recentes.
+  /// O player do YouTube às vezes avisa "terminou" antes do fim (trecho
+  /// bloqueado, falha de rede); aí o app fica onde está.
   void _onEnded() {
     final vid = _player.videoId;
     if (vid == null) return;
-    session.progress(vid, _player.duration, _player.duration);
+    final pos = _player.position.value;
+    final dur = _player.duration;
+    final atEnd = dur > 0 && pos >= dur - 5;
+    Log.info('Vídeo $vid terminou em ${formatTime(pos)} de ${formatTime(dur)}'
+        '${atEnd ? '' : ' — antes do fim, não segue para o próximo'}');
+    if (!atEnd) return;
+    session.progress(vid, dur, dur);
     history.save();
     final items = history.items;
     final i = items.indexWhere((x) => x.id == vid);
-    if (i >= 0 && i + 1 < items.length) _openItem(items[i + 1]);
+    if (i >= 0 && i + 1 < items.length) _openItem(items[i + 1], why: 'o anterior terminou');
   }
 
   void _seekTo(double seconds) {
