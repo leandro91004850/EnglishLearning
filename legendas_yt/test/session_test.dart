@@ -5,11 +5,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:legendas_yt/src/app/session.dart';
+import 'package:legendas_yt/src/core/cue.dart';
+import 'package:legendas_yt/src/core/subtitles.dart';
+import 'package:legendas_yt/src/data/banco.dart';
 import 'package:legendas_yt/src/data/history.dart';
 import 'package:legendas_yt/src/data/translation_cache.dart';
 import 'package:legendas_yt/src/translation/translator.dart';
 import 'package:legendas_yt/src/youtube/transcript_api.dart';
 
+import 'fake_banco.dart';
 import 'helpers.dart';
 
 void main() {
@@ -19,7 +23,7 @@ void main() {
   late SubtitleSession session;
   late History history;
 
-  SubtitleSession build({required http.Client translate}) {
+  SubtitleSession build({required http.Client translate, Banco? banco}) {
     history = History(File('${dir.path}/historico.json'));
     return SubtitleSession(
       history: history,
@@ -30,6 +34,7 @@ void main() {
             jsonEncode({'title': 'Um vídeo', 'author_name': 'Um canal'}),
             200,
           )),
+      banco: banco,
     );
   }
 
@@ -121,5 +126,86 @@ void main() {
     expect(session.meta!.sourceCode, 'pt');
     expect(session.meta!.target, 'en');
     expect(session.status, 'pt → English ✓ (Google)');
+  });
+
+  group('com o banco de dados', () {
+    test('legenda que o banco já tem: sem YouTube, e só traduz o que falta', () async {
+      final db = FakeBanco()
+        ..stored = SavedTrack(
+          id: 42,
+          db: 0,
+          meta: const SubtitleMeta(
+            cues: [Cue(1, 2, 'hello there'), Cue(3, 2, 'how are you')],
+            sourceName: 'English',
+            sourceCode: 'en',
+            generated: false,
+            target: 'pt',
+            targetName: 'Português',
+          ),
+          translations: [(0, 'olá')],
+        );
+      session = build(translate: upperGoogle(), banco: db);
+      session.load('abcdefghijk');
+      await eventually(() => !session.busy);
+      await db.flush();
+
+      expect(yt.requests, isEmpty, reason: 'a legenda veio do banco');
+      expect(session.translations, ['olá', 'HOW ARE YOU']);
+      expect(googleBatches, ['how are you']);
+      expect(db.translationsSaved, [(1, 'HOW ARE YOU')]);
+      expect(session.status, 'English → Português ✓ (Google + banco de dados)');
+    });
+
+    test('tudo traduzido no banco: nem o tradutor é chamado', () async {
+      final db = FakeBanco()
+        ..stored = SavedTrack(
+          id: 42,
+          db: 0,
+          meta: const SubtitleMeta(
+            cues: [Cue(1, 2, 'hello')],
+            sourceName: 'English',
+            sourceCode: 'en',
+            generated: true,
+            target: 'pt',
+            targetName: 'Português',
+          ),
+          translations: [(0, 'olá')],
+        );
+      session = build(translate: upperGoogle(), banco: db);
+      session.load('abcdefghijk');
+      await eventually(() => !session.busy);
+      expect(googleBatches, isEmpty);
+      expect(session.status, 'English → Português ✓ (banco de dados)');
+    });
+
+    test('legenda nova: vem do YouTube e vai para o banco, com as traduções', () async {
+      final db = FakeBanco();
+      session = build(translate: upperGoogle(), banco: db);
+      session.load('abcdefghijk', source: 'en');
+      await eventually(() => !session.busy);
+      await db.flush();
+      expect(db.calls, [
+        'findTranscript',
+        'findTrack',
+        'saveTranscript abcdefghijk en 3',
+        'saveTranslations 7',
+      ]);
+      expect(db.translationsSaved, [(0, 'HELLO THERE'), (1, 'HOW ARE YOU')]);
+      expect(session.status, 'English → Português ✓ (Google)');
+    });
+
+    test('legenda já traduzida só no aparelho vai para o banco', () async {
+      final db = FakeBanco();
+      session = build(translate: upperGoogle(), banco: db);
+      session.load('abcdefghijk');
+      await eventually(() => !session.busy);
+      await db.flush();
+      db.calls.clear();
+
+      session.load('abcdefghijk'); // de novo: vem do cache do aparelho
+      await eventually(() => !session.busy);
+      await db.flush();
+      expect(db.calls, ['storeComplete abcdefghijk 2']);
+    });
   });
 }

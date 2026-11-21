@@ -5,6 +5,7 @@ library;
 
 import 'dart:convert';
 
+import '../data/banco.dart';
 import '../translation/translator.dart';
 import '../youtube/transcript_api.dart';
 import '../youtube/video_id.dart';
@@ -12,10 +13,14 @@ import 'subtitles.dart';
 import 'text.dart';
 
 class Diagnostics {
-  Diagnostics({required this.translation, required this.transcripts});
+  Diagnostics({required this.translation, required this.transcripts, this.banco});
 
   final TranslationService translation;
   final TranscriptApi transcripts;
+
+  /// Banco de dados, se houver: conecta, cria o banco e as tabelas se faltarem
+  /// e conta o que está guardado.
+  final Banco? banco;
 
   static const List<String> samples = [
     'Hello, how are you?',
@@ -30,6 +35,12 @@ class Diagnostics {
     translatorsOk = 0;
     yield 'Legendas YT — diagnóstico';
     yield '';
+
+    final db = banco;
+    if (db != null) {
+      final (good, message) = await db.check();
+      yield good ? '[OK]    Banco de dados: $message' : '[FALHA] Banco de dados: $message';
+    }
 
     final results = <(bool, DateTime?)>[];
     for (final MapEntry(key: name, value: engine) in translation.engines.entries) {

@@ -15,6 +15,7 @@ import '../core/text.dart';
 import '../data/history.dart';
 import '../data/prefs.dart';
 import '../youtube/video_id.dart';
+import 'database_page.dart';
 import 'diagnostics_page.dart';
 import 'player/player_controller.dart';
 import 'theme.dart';
@@ -73,7 +74,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       onPause: history.save,
       onDetach: history.save,
       onExitRequested: () async {
-        history.save(); // guarda onde o último vídeo parou
+        await widget.services.shutdown(); // guarda onde o último vídeo parou e espera o banco
         return AppExitResponse.exit;
       },
     );
@@ -95,6 +96,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             autoplay: false,
             start: last.resumeAt,
             why: 'último assistido, ao abrir o app',
+            restoring: true,
           );
         }
       });
@@ -127,11 +129,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     bool autoplay = true,
     double? start,
     String why = 'link',
+    bool restoring = false,
   }) {
     final src = normalizeSource(source ?? _source);
     final vid = extractVideoId(text);
     final saved = vid == null ? null : history.find(vid);
-    final result = session.load(text, source: src, keepPlace: keepPlace);
+    final result = session.load(text, source: src, keepPlace: keepPlace, restoring: restoring);
     if (!result.ok) {
       _snack(result.error!);
       return;
@@ -301,6 +304,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   void _onMenu(MenuAction action) {
     switch (action) {
+      case MenuAction.database:
+        _openDatabase();
       case MenuAction.diagnostics:
         final vid = session.videoId;
         Navigator.of(context).push(MaterialPageRoute<void>(
@@ -314,7 +319,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           context: context,
           applicationName: 'Legendas YT',
           applicationVersion: '1.0.0',
-          applicationIcon: const Icon(Icons.subtitles, size: 40),
+          applicationIcon: ClipRRect(
+            borderRadius: BorderRadius.circular(11),
+            child: Image.asset('assets/icone.png', width: 48, height: 48),
+          ),
           children: const [
             SizedBox(height: 8),
             Text(
@@ -375,6 +383,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     const SizedBox(height: 4),
                     _toolbar(compact: false),
                     StatusLine(session: session, history: history),
+                    _dbWarning(),
                   ],
                 ),
               ),
@@ -398,6 +407,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         ),
         _toolbar(compact: true),
         StatusLine(session: session, history: history),
+        _dbWarning(),
         const Divider(),
         Expanded(child: _sidePanel()),
       ],
@@ -427,14 +437,56 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
-  Widget _topBar({required bool compact}) => TopBar(
-        url: _url,
-        source: _source,
-        compact: compact,
-        onSourceChanged: _changeSource,
-        onOpen: _openTyped,
-        onPaste: _paste,
-        onMenu: _onMenu,
+  void _openDatabase() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => DatabasePage(services: widget.services),
+    ));
+  }
+
+  /// Banco de dados configurado mas com problema: o aviso (tocar abre a configuração).
+  Widget _dbWarning() {
+    return ValueListenableBuilder<String>(
+      valueListenable: widget.services.dbStatus,
+      builder: (context, message, _) {
+        if (message.isEmpty || !widget.services.banco.configured) return const SizedBox.shrink();
+        final theme = Theme.of(context);
+        return InkWell(
+          onTap: _openDatabase,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.storage_outlined, size: 16, color: theme.colorScheme.error),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    message,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _topBar({required bool compact}) => ValueListenableBuilder<String>(
+        valueListenable: widget.services.dbStatus,
+        builder: (context, dbMessage, _) => TopBar(
+          url: _url,
+          source: _source,
+          compact: compact,
+          dbProblem: dbMessage.isNotEmpty && widget.services.banco.configured,
+          onSourceChanged: _changeSource,
+          onOpen: _openTyped,
+          onPaste: _paste,
+          onMenu: _onMenu,
+        ),
       );
 
   Widget _toolbar({required bool compact}) => PlayerToolbar(

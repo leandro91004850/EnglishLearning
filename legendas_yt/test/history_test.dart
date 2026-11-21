@@ -9,7 +9,7 @@ void main() {
   late Directory dir;
   late DateTime now;
   File file() => File('${dir.path}/historico.json');
-  History history({int limit = historyLimit}) => History(file(), limit: limit, now: () => now);
+  History history() => History(file(), now: () => now);
   List<String> ids(History h) => [for (final x in h.items) x.id];
 
   setUp(() {
@@ -38,23 +38,26 @@ void main() {
     expect(ids(h), ['aaaaaaaaaaa', 'ccccccccccc']);
   });
 
-  test('limite de vídeos, setas e o último assistido', () {
-    final h = history(limit: 3);
-    for (final id in ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd']) {
+  test('sem limite de vídeos, setas e o último assistido', () {
+    final h = history();
+    final all = [for (var i = 0; i < 40; i++) 'v${i.toString().padLeft(10, '0')}'];
+    for (final id in all) {
       now = now.add(const Duration(minutes: 1));
       h.opened(id, 'auto');
     }
-    expect(ids(h), ['ddddddddddd', 'ccccccccccc', 'bbbbbbbbbbb']);
+    expect(ids(h), all.reversed.toList(), reason: 'todos ficam, o último aberto no topo');
+    expect(ids(history()), ids(h), reason: 'e todos voltam do arquivo');
 
-    expect(h.move('ddddddddddd', -1), isFalse); // já está no topo
-    expect(h.move('ddddddddddd', 1), isTrue);
-    expect(ids(h), ['ccccccccccc', 'ddddddddddd', 'bbbbbbbbbbb']);
-    expect(h.latest!.id, 'ddddddddddd'); // mover não muda o `at`
+    final top = all.last, second = all[all.length - 2];
+    expect(h.move(top, -1), isFalse); // já está no topo
+    expect(h.move(top, 1), isTrue);
+    expect(ids(h).take(2), [second, top]);
+    expect(h.latest!.id, top); // mover não muda o `at`
 
     now = now.add(const Duration(minutes: 1));
-    h.opened('bbbbbbbbbbb', 'auto', keepPlace: true);
-    expect(h.latest!.id, 'bbbbbbbbbbb');
-    expect(ids(h).last, 'bbbbbbbbbbb');
+    h.opened(all.first, 'auto', keepPlace: true);
+    expect(h.latest!.id, all.first);
+    expect(ids(h).last, all.first);
   });
 
   test('arrastar na lista: leva o vídeo para qualquer posição e grava', () {

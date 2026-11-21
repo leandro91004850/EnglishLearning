@@ -41,6 +41,7 @@ dependencies:
   webview_flutter_wkwebview: ^3.27.2
   path_provider: ^2.1.6
   url_launcher: ^6.3.3
+  postgres: ^3.6.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -63,10 +64,9 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  # O ícone do app, para o ⋮ › Sobre (sai do tool/icone/gerar.sh, como os das plataformas).
+  assets:
+    - assets/icone.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

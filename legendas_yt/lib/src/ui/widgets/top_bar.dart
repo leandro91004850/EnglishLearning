@@ -1,6 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 
-enum MenuAction { diagnostics, about }
+enum MenuAction { database, diagnostics, about }
 
 const Map<String, String> sourceLabels = {'auto': 'Auto', 'en': 'EN', 'pt': 'PT'};
 
@@ -15,6 +15,7 @@ class TopBar extends StatelessWidget {
     required this.onOpen,
     required this.onPaste,
     required this.onMenu,
+    this.dbProblem = false,
   });
 
   final TextEditingController url;
@@ -24,6 +25,9 @@ class TopBar extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onPaste;
   final ValueChanged<MenuAction> onMenu;
+
+  /// Banco de dados configurado, mas com problema: ponto vermelho no menu.
+  final bool dbProblem;
 
   @override
   Widget build(BuildContext context) {
@@ -77,15 +81,26 @@ class TopBar extends StatelessWidget {
             child: const Text('Abrir'),
           ),
           PopupMenuButton<MenuAction>(
-            tooltip: 'Mais',
-            icon: const Icon(Icons.more_vert),
+            tooltip: dbProblem ? 'Mais (banco de dados sem conexão)' : 'Mais',
+            icon: Badge(isLabelVisible: dbProblem, smallSize: 9, child: const Icon(Icons.more_vert)),
             onSelected: onMenu,
-            itemBuilder: (_) => const [
+            itemBuilder: (_) => [
               PopupMenuItem(
+                value: MenuAction.database,
+                child: ListTile(
+                  leading: Badge(
+                    isLabelVisible: dbProblem,
+                    smallSize: 8,
+                    child: const Icon(Icons.storage_outlined),
+                  ),
+                  title: const Text('Banco de dados'),
+                ),
+              ),
+              const PopupMenuItem(
                 value: MenuAction.diagnostics,
                 child: ListTile(leading: Icon(Icons.troubleshoot), title: Text('Diagnóstico')),
               ),
-              PopupMenuItem(
+              const PopupMenuItem(
                 value: MenuAction.about,
                 child: ListTile(leading: Icon(Icons.info_outline), title: Text('Sobre')),
               ),

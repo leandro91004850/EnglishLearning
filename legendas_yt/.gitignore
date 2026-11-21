@@ -46,3 +46,10 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Dados de acesso ao banco de dados (têm a senha): só o modelo .env.example vai para o git
+.env
+.env.tmp
+
+# Imagens-mestre do ícone (o tool/icone/gerar.sh grava de novo)
+/tool/icone/saida/

@@ -14,6 +14,7 @@ import '../core/cue.dart';
 import '../core/log.dart';
 import '../core/subtitles.dart';
 import '../core/text.dart';
+import '../data/banco.dart';
 import '../data/history.dart';
 import '../data/translation_cache.dart';
 import '../translation/translator.dart';
@@ -36,6 +37,7 @@ class SubtitleSession extends ChangeNotifier {
     required this.transcripts,
     required this.translation,
     required this.client,
+    this.banco,
   });
 
   final History history;
@@ -43,6 +45,10 @@ class SubtitleSession extends ChangeNotifier {
   final TranscriptApi transcripts;
   final TranslationService translation;
   final http.Client client;
+
+  /// Banco de dados (PostgreSQL), quando configurado: legendas e traduções já
+  /// feitas vêm de lá, e as novas vão para lá.
+  final Banco? banco;
 
   int _job = 0;
   int _focus = 0;
@@ -71,7 +77,7 @@ class SubtitleSession extends ChangeNotifier {
 
   /// Abre o vídeo e começa a buscar a legenda. [keepPlace]: o vídeo foi aberto
   /// pela lista de recentes e fica no lugar dele.
-  LoadResult load(String url, {String source = 'auto', bool keepPlace = false}) {
+  LoadResult load(String url, {String source = 'auto', bool keepPlace = false, bool restoring = false}) {
     final vid = extractVideoId(url);
     if (vid == null) return const LoadResult.error('Link do YouTube inválido.');
     source = normalizeSource(source);
@@ -93,7 +99,7 @@ class SubtitleSession extends ChangeNotifier {
     notifyListeners();
 
     unawaited(_run(job, vid, source));
-    if (history.opened(vid, source, keepPlace: keepPlace)) unawaited(_fetchTitle(vid));
+    if (history.opened(vid, source, keepPlace: keepPlace, restoring: restoring)) unawaited(_fetchTitle(vid));
     return LoadResult.ok(vid);
   }
 
@@ -215,60 +221,97 @@ class SubtitleSession extends ChangeNotifier {
   }
 
   Future<void> _work(int job, String vid, String source) async {
+    final banco = this.banco;
     final cached = await cache.get(vid, source);
     if (cached != null) {
       if (!_alive(job)) return;
       _onTranscript(job, cached.meta);
       _onTranslations(job, cached.pairs);
       _setStatus(job, cached.doneMessage);
+      // legenda traduzida só no aparelho (de antes do banco, ou com ele fora do ar): leva para o banco
+      if (banco != null && banco.configured) {
+        banco.submit(() => banco.storeComplete(vid, source, cached.meta, cached.pairs));
+      }
       return;
     }
 
-    // 1) legenda original
-    final CaptionTrack track;
-    final List<Cue> cues;
-    try {
-      _setStatus(job, 'Buscando legendas…');
-      track = pickTranscript(await transcripts.list(vid), source, vid);
-      final fetched = await transcripts.fetch(track);
-      cues = _sorted([for (final c in fetched) Cue(c.start, c.dur, clean(c.text))]);
-    } catch (e) {
-      Log.warning('Legendas de $vid: $e');
-      _setStatus(job, friendlyError(e), error: true);
-      return;
+    // 1) legenda original. Vem do banco se esta opção do seletor de idioma já abriu
+    //    este vídeo (ou se outra opção já abriu a mesma faixa), com as traduções já
+    //    feitas; senão, do YouTube, e vai para o banco. wait: false — com o banco
+    //    fora do ar, a legenda não espera uma tentativa de reconexão (quem reconecta
+    //    é a fila de gravações).
+    SavedTrack? saved = banco == null ? null : await banco.findTranscript(vid, source, wait: false);
+    if (saved == null) {
+      try {
+        _setStatus(job, 'Buscando legendas…');
+        final track = pickTranscript(await transcripts.list(vid), source, vid);
+        saved = banco == null
+            ? null
+            : await banco.findTrack(vid, track.languageCode, track.isGenerated, wait: false);
+        if (saved != null) {
+          final found = saved;
+          banco!.submit(() => banco.linkChoice(vid, source, found));
+        } else {
+          final fetched = await transcripts.fetch(track);
+          final cues = _sorted([for (final c in fetched) Cue(c.start, c.dur, clean(c.text))]);
+          if (!_alive(job)) return;
+          if (cues.every((c) => c.text.isEmpty)) {
+            _setStatus(job, 'A legenda deste vídeo veio vazia.', error: true);
+            return;
+          }
+          final tgt = targetFor(track.languageCode);
+          final fresh = SavedTrack(
+            meta: SubtitleMeta(
+              cues: cues,
+              sourceName: languageName(track),
+              sourceCode: track.languageCode,
+              generated: track.isGenerated,
+              target: tgt,
+              targetName: targetName(tgt),
+            ),
+          );
+          saved = fresh;
+          // grava em segundo plano; a gravação põe o id da faixa em fresh.id, que as
+          // traduções (gravadas depois, na mesma fila) usam
+          banco?.submit(() => banco.saveTranscript(fresh, vid, source));
+        }
+      } catch (e) {
+        Log.warning('Legendas de $vid: $e');
+        _setStatus(job, friendlyError(e), error: true);
+        return;
+      }
     }
     if (!_alive(job)) return;
-    if (cues.every((c) => c.text.isEmpty)) {
-      _setStatus(job, 'A legenda deste vídeo veio vazia.', error: true);
-      return;
-    }
 
-    final srcCode = langFamily(track.languageCode);
-    final tgt = targetFor(track.languageCode);
-    final m = SubtitleMeta(
-      cues: cues,
-      sourceName: languageName(track),
-      sourceCode: track.languageCode,
-      generated: track.isGenerated,
-      target: tgt,
-      targetName: targetName(tgt),
-    );
-    Log.info('Vídeo $vid: ${cues.length} falas em ${track.languageCode} '
-        '(${track.isGenerated ? 'auto' : 'manual'}) -> $tgt');
+    final track = saved;
+    final m = track.meta;
+    final cues = m.cues;
+    final done = List.of(track.translations);
+    Log.info('Vídeo $vid: ${cues.length} falas em ${m.sourceCode} '
+        '(${m.generated ? 'auto' : 'manual'}) -> ${m.target}'
+        '${done.isNotEmpty ? '; ${done.length} já traduzidas no banco' : ''}');
     _onTranscript(job, m);
-    _setStatus(job, 'Traduzindo para ${m.targetName}…');
+    if (done.isNotEmpty) _onTranslations(job, done);
 
-    // 2) tradução em lotes, começando pelo trecho onde o vídeo está
+    // 2) tradução em lotes do que ainda falta, começando pelo trecho onde o vídeo está
+    final have = {for (final (i, _) in done) i};
     final items = [
       for (var i = 0; i < cues.length; i++)
-        if (cues[i].text.isNotEmpty) (i, cues[i].text),
+        if (cues[i].text.isNotEmpty && !have.contains(i)) (i, cues[i].text),
     ];
+    final fromDb = done.isNotEmpty ? const ['banco de dados'] : const <String>[];
+    if (items.isEmpty) {
+      _finish(job, vid, source, m, done, fromDb);
+      return;
+    }
+    _setStatus(job, 'Traduzindo para ${m.targetName}…');
+    final srcCode = langFamily(m.sourceCode);
     final chunks = makeChunks(items);
     final translator = Translator(
       translation,
       srcCode == 'en' || srcCode == 'pt' ? srcCode : 'auto',
-      tgt,
-      sourceLang: track.languageCode,
+      m.target,
+      sourceLang: m.sourceCode,
     );
     final collected = <(int, String)>[];
     var pending = [for (var i = 0; i < chunks.length; i++) i];
@@ -312,15 +355,17 @@ class SubtitleSession extends ChangeNotifier {
           for (var k = 0; k < math.min(chunk.length, out.length); k++) (chunk[k].$1, out[k]),
         ];
         collected.addAll(pairs);
+        banco?.submit(() => banco.saveTranslations(track, pairs));
         if (_alive(job)) {
           _onTranslations(job, pairs);
           if (translator.last == 'MyMemory') {
             // a interface acabou de pôr "Traduzindo… N%"
             final why = translator.googleBlocked ? 'o Google bloqueou temporariamente' : 'o Google falhou';
+            final total = have.length + items.length;
             _setStatus(
               job,
               'Traduzindo pelo MyMemory (reserva, até ${thousands(myMemoryDailyChars)} caracteres '
-              'por dia), porque $why… ${(100 * collected.length / items.length).round()}%',
+              'por dia), porque $why… ${(100 * (have.length + collected.length) / total).round()}%',
             );
           }
         }
@@ -337,9 +382,14 @@ class SubtitleSession extends ChangeNotifier {
       _setStatus(job, msg, error: true);
       return;
     }
-    final engines = (translator.used.toList()..sort()).join(' + ');
-    final done = '${m.sourceName} → ${m.targetName} ✓ (${engines.isEmpty ? '—' : engines})';
-    cache.put(vid, source, CachedSubtitles(m, collected, done));
+    _finish(job, vid, source, m, [...done, ...collected], [...(translator.used.toList()..sort()), ...fromDb]);
+  }
+
+  /// Legenda toda traduzida: guarda no aparelho (para reabrir na hora) e avisa a
+  /// interface. [sources]: de onde vieram as traduções (tradutores, banco de dados).
+  void _finish(int job, String vid, String source, SubtitleMeta m, List<(int, String)> pairs, List<String> sources) {
+    final done = '${m.sourceName} → ${m.targetName} ✓ (${sources.isEmpty ? '—' : sources.join(' + ')})';
+    cache.put(vid, source, CachedSubtitles(m, pairs, done));
     _setStatus(job, done);
   }
 

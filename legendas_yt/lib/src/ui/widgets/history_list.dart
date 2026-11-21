@@ -7,7 +7,8 @@ import '../../youtube/video_id.dart';
 
 /// Os vídeos recentes. Tocar abre o vídeo (ele fica no lugar dele na lista);
 /// tocar e segurar levanta o vídeo, que pode ser arrastado para cima ou para
-/// baixo (no lugar das setas do app.py); o × tira da lista.
+/// baixo (no lugar das setas do app.py); o × tira da lista — só sem o banco de
+/// dados: com ele, a lista tem todos os vídeos de lá ([History.canRemove]).
 class HistoryList extends StatelessWidget {
   const HistoryList({
     super.key,
@@ -78,7 +79,7 @@ class HistoryList extends StatelessWidget {
                   item: item,
                   current: item.id == currentId,
                   onOpen: () => onOpen(item),
-                  onRemove: () => onRemove(item),
+                  onRemove: history.canRemove ? () => onRemove(item) : null,
                 ),
               ),
             );
@@ -129,13 +130,15 @@ class _HistoryTile extends StatelessWidget {
     required this.item,
     required this.current,
     required this.onOpen,
-    required this.onRemove,
+    this.onRemove,
   });
 
   final HistoryItem item;
   final bool current;
   final VoidCallback onOpen;
-  final VoidCallback onRemove;
+
+  /// O ×; sem ele (com o banco de dados), o botão não aparece.
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -204,12 +207,15 @@ class _HistoryTile extends StatelessWidget {
                   ],
                 ),
               ),
-              IconButton(
-                visualDensity: compact,
-                tooltip: 'Tirar da lista',
-                onPressed: onRemove,
-                icon: const Icon(Icons.close, size: 20),
-              ),
+              if (onRemove != null)
+                IconButton(
+                  visualDensity: compact,
+                  tooltip: 'Tirar da lista',
+                  onPressed: onRemove,
+                  icon: const Icon(Icons.close, size: 20),
+                )
+              else
+                const SizedBox(width: 8),
             ],
           ),
         ),

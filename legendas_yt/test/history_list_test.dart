@@ -6,6 +6,8 @@ import 'package:legendas_yt/src/data/history.dart';
 import 'package:legendas_yt/src/ui/widgets/history_list.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'fake_banco.dart';
+
 void main() {
   testWidgets('segurar e arrastar um vídeo muda a ordem; toque rápido abre', (tester) async {
     final dir = Directory.systemTemp.createTempSync('legendas_drag');
@@ -59,5 +61,23 @@ void main() {
     await tester.tap(find.text('Vídeo B'));
     await tester.pumpAndSettle();
     expect(opened, ['bbbbbbbbbbb']);
+  });
+
+  testWidgets('com o banco de dados a lista não tem ×; sem ele, tem', (tester) async {
+    final dir = Directory.systemTemp.createTempSync('legendas_x');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final history = History(File('${dir.path}/historico.json'))..opened('aaaaaaaaaaa', 'auto');
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: HistoryList(history: history, currentId: null, onOpen: (_) {}, onRemove: (_) {}),
+      ),
+    ));
+    expect(find.byTooltip('Tirar da lista'), findsOneWidget);
+
+    history
+      ..attach(FakeBanco())
+      ..dbReset(); // como depois de gravar os dados de acesso
+    await tester.pump();
+    expect(find.byTooltip('Tirar da lista'), findsNothing);
   });
 }
