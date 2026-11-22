@@ -1,10 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Legendas (YouTube) e tradução (Google, MyMemory). -->
+    <!-- A API do Legendas YT (lista, legendas e tradução) e o player do YouTube. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="Legendas YT"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

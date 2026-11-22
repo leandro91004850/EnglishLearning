@@ -26,8 +26,15 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>O Legendas YT conecta ao seu servidor PostgreSQL na rede local para guardar os recentes, as legendas e as traduções.</string>
+	<string>O Legendas YT conecta ao servidor dele (a API) na rede local, de onde vêm a lista de vídeos, as legendas e as traduções.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

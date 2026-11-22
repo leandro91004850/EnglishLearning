@@ -1,29 +1,20 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:legendas_yt/src/app/session.dart';
 import 'package:legendas_yt/src/core/cue.dart';
 import 'package:legendas_yt/src/core/subtitles.dart';
 import 'package:legendas_yt/src/data/history.dart';
-import 'package:legendas_yt/src/data/translation_cache.dart';
-import 'package:legendas_yt/src/translation/translator.dart';
 import 'package:legendas_yt/src/ui/widgets/transcript_list.dart';
-import 'package:legendas_yt/src/youtube/transcript_api.dart';
 import 'package:material_ui/material_ui.dart';
+
+import 'fake_api.dart';
 
 /// Uma sessão já com a legenda carregada: 600 falas, umas curtas e outras
 /// longas (alturas bem diferentes na lista).
 SubtitleSession loadedSession(Directory dir) {
-  final offline = MockClient((_) async => http.Response('', 500));
-  final s = SubtitleSession(
-    history: History(File('${dir.path}/historico.json')),
-    cache: TranslationCache(Directory('${dir.path}/cache')),
-    transcripts: TranscriptApi(client: offline),
-    translation: TranslationService(client: offline),
-    client: offline,
-  );
+  final api = FakeApi().api();
+  final s = SubtitleSession(api: api, history: History(api));
   final cues = [
     for (var i = 0; i < 600; i++)
       Cue(i * 3.0, 3, i % 7 == 0 ? 'fala $i ${'muito comprida ' * 12}' : 'fala $i'),

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
@@ -15,8 +14,7 @@ import '../core/text.dart';
 import '../data/history.dart';
 import '../data/prefs.dart';
 import '../youtube/video_id.dart';
-import 'database_page.dart';
-import 'diagnostics_page.dart';
+import 'app_actions.dart';
 import 'player/player_controller.dart';
 import 'theme.dart';
 import 'widgets/history_list.dart';
@@ -34,10 +32,15 @@ const double kWideLayout = 900;
 /// app.py faz abaixo de uns 720×460).
 const double kVideoOnlyHeight = 460;
 
+/// Os vídeos: o player do YouTube com a legenda e a tradução, a lista de falas e a lista de vídeos.
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.services});
+  const HomePage({super.key, required this.services, this.startVideo, this.startAt});
 
   final AppServices services;
+
+  /// Abre direto este vídeo, em [startAt] segundos (o "Ver no vídeo" do quiz).
+  final String? startVideo;
+  final double? startAt;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -73,10 +76,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       onHide: history.save,
       onPause: history.save,
       onDetach: history.save,
-      onExitRequested: () async {
-        await widget.services.shutdown(); // guarda onde o último vídeo parou e espera o banco
-        return AppExitResponse.exit;
-      },
     );
     WindowControl.listen((on) {
       if (mounted && on != _fullscreen) setState(() => _fullscreen = on);
@@ -84,25 +83,50 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) WindowControl.lockPortraitOnPhone(phone: _phone);
     });
-    // reabre o último vídeo assistido, parado onde ficou
-    final last = history.latest;
-    if (last != null) {
+    final start = widget.startVideo;
+    final current = session.videoId;
+    if (start != null) {
+      // uma frase do quiz: o vídeo dela, no ponto onde ela começa
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _open(watchUrlFor(start), keepPlace: true, start: widget.startAt, why: 'frase do quiz');
+      });
+      return;
+    }
+    if (current != null) {
+      // voltou do menu: o mesmo vídeo de antes, parado onde estava
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _open(
-            last.link,
-            source: last.source,
+            watchUrlFor(current),
+            source: session.source,
             keepPlace: true,
             autoplay: false,
-            start: last.resumeAt,
-            why: 'último assistido, ao abrir o app',
+            start: history.find(current)?.resumeAt,
+            why: 'volta para os vídeos',
             restoring: true,
           );
         }
       });
-    } else {
-      _tabs.index = 1;
+      return;
     }
+    // reabre o último vídeo assistido, parado onde ficou, quando a lista chega da API
+    unawaited(widget.services.ready.then((_) {
+      if (!mounted || session.videoId != null) return;
+      final last = history.latest;
+      if (last == null) {
+        _tabs.index = 1;
+        return;
+      }
+      _open(
+        last.link,
+        source: last.source,
+        keepPlace: true,
+        autoplay: false,
+        start: last.resumeAt,
+        why: 'último assistido, ao abrir o app',
+        restoring: true,
+      );
+    }));
   }
 
   @override
@@ -173,11 +197,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     setState(() => _source = value);
     final vid = session.videoId;
     if (vid != null) _open(vid, source: value, keepPlace: true, why: 'troca do idioma da legenda');
-  }
-
-  void _removeItem(HistoryItem item) {
-    history.remove(item.id);
-    unawaited(widget.services.cache.prune({for (final x in history.items) x.id}));
   }
 
   Future<void> _paste() async {
@@ -304,36 +323,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   void _onMenu(MenuAction action) {
     switch (action) {
-      case MenuAction.database:
-        _openDatabase();
+      case MenuAction.server:
+        openServer(context, widget.services);
       case MenuAction.diagnostics:
         final vid = session.videoId;
-        Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => DiagnosticsPage(
-            diagnostics: widget.services.diagnostics(),
-            url: vid == null ? null : watchUrlFor(vid),
-          ),
-        ));
+        openDiagnostics(context, widget.services, url: vid == null ? null : watchUrlFor(vid));
       case MenuAction.about:
-        showAboutDialog(
-          context: context,
-          applicationName: 'Legendas YT',
-          applicationVersion: '1.0.0',
-          applicationIcon: ClipRRect(
-            borderRadius: BorderRadius.circular(11),
-            child: Image.asset('assets/icone.png', width: 48, height: 48),
-          ),
-          children: const [
-            SizedBox(height: 8),
-            Text(
-              'Abre o vídeo do YouTube, baixa a legenda original e mostra, junto com o vídeo, a fala '
-              'original e a tradução (inglês ⇄ português).\n\n'
-              'Tradução: Google Tradutor gratuito; quando ele falha, a reserva MyMemory '
-              '(até 5.000 caracteres por dia).\n\n'
-              'Atalhos: espaço tocar/pausar · ← → fala anterior/próxima · R repetir · F tela cheia · + − tamanho da legenda.',
-            ),
-          ],
-        );
+        showAbout(context);
     }
   }
 
@@ -383,7 +379,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     const SizedBox(height: 4),
                     _toolbar(compact: false),
                     StatusLine(session: session, history: history),
-                    _dbWarning(),
+                    _apiWarning(),
                   ],
                 ),
               ),
@@ -407,7 +403,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         ),
         _toolbar(compact: true),
         StatusLine(session: session, history: history),
-        _dbWarning(),
+        _apiWarning(),
         const Divider(),
         Expanded(child: _sidePanel()),
       ],
@@ -437,27 +433,23 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
-  void _openDatabase() {
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => DatabasePage(services: widget.services),
-    ));
-  }
+  void _openServer() => openServer(context, widget.services);
 
-  /// Banco de dados configurado mas com problema: o aviso (tocar abre a configuração).
-  Widget _dbWarning() {
+  /// Problema com a API (ou com o banco de dados dela): o aviso (tocar abre ⋮ › Servidor).
+  Widget _apiWarning() {
     return ValueListenableBuilder<String>(
-      valueListenable: widget.services.dbStatus,
+      valueListenable: widget.services.apiStatus,
       builder: (context, message, _) {
-        if (message.isEmpty || !widget.services.banco.configured) return const SizedBox.shrink();
+        if (message.isEmpty) return const SizedBox.shrink();
         final theme = Theme.of(context);
         return InkWell(
-          onTap: _openDatabase,
+          onTap: _openServer,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.storage_outlined, size: 16, color: theme.colorScheme.error),
+                Icon(Icons.dns_outlined, size: 16, color: theme.colorScheme.error),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -476,12 +468,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   Widget _topBar({required bool compact}) => ValueListenableBuilder<String>(
-        valueListenable: widget.services.dbStatus,
-        builder: (context, dbMessage, _) => TopBar(
+        valueListenable: widget.services.apiStatus,
+        builder: (context, problem, _) => TopBar(
           url: _url,
           source: _source,
           compact: compact,
-          dbProblem: dbMessage.isNotEmpty && widget.services.banco.configured,
+          serverProblem: problem.isNotEmpty,
+          onBack: Navigator.of(context).canPop() ? () => Navigator.of(context).maybePop() : null,
           onSourceChanged: _changeSource,
           onOpen: _openTyped,
           onPaste: _paste,
@@ -529,7 +522,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   history: history,
                   currentId: session.videoId,
                   onOpen: _openItem,
-                  onRemove: _removeItem,
                 ),
               ),
             ],

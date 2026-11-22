@@ -7,21 +7,19 @@ import '../../youtube/video_id.dart';
 
 /// Os vídeos recentes. Tocar abre o vídeo (ele fica no lugar dele na lista);
 /// tocar e segurar levanta o vídeo, que pode ser arrastado para cima ou para
-/// baixo (no lugar das setas do app.py); o × tira da lista — só sem o banco de
-/// dados: com ele, a lista tem todos os vídeos de lá ([History.canRemove]).
+/// baixo (no lugar das setas do app.py). A lista vem da API, com todos os vídeos
+/// do banco de dados: não há ×.
 class HistoryList extends StatelessWidget {
   const HistoryList({
     super.key,
     required this.history,
     required this.currentId,
     required this.onOpen,
-    required this.onRemove,
   });
 
   final History history;
   final String? currentId;
   final ValueChanged<HistoryItem> onOpen;
-  final ValueChanged<HistoryItem> onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +77,6 @@ class HistoryList extends StatelessWidget {
                   item: item,
                   current: item.id == currentId,
                   onOpen: () => onOpen(item),
-                  onRemove: history.canRemove ? () => onRemove(item) : null,
                 ),
               ),
             );
@@ -130,15 +127,11 @@ class _HistoryTile extends StatelessWidget {
     required this.item,
     required this.current,
     required this.onOpen,
-    this.onRemove,
   });
 
   final HistoryItem item;
   final bool current;
   final VoidCallback onOpen;
-
-  /// O ×; sem ele (com o banco de dados), o botão não aparece.
-  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -150,14 +143,13 @@ class _HistoryTile extends StatelessWidget {
       if (item.at > 0) timeAgo(item.at),
     ].join(' · ');
     final where = item.dur > 0 ? '${formatTime(item.pos)} / ${formatTime(item.dur)}' : '';
-    const compact = VisualDensity(horizontal: -4, vertical: -4);
 
     return Material(
       color: current ? scheme.primary.withValues(alpha: 0.12) : Colors.transparent,
       child: InkWell(
         onTap: onOpen,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
           child: Row(
             children: [
               ClipRRect(
@@ -207,15 +199,6 @@ class _HistoryTile extends StatelessWidget {
                   ],
                 ),
               ),
-              if (onRemove != null)
-                IconButton(
-                  visualDensity: compact,
-                  tooltip: 'Tirar da lista',
-                  onPressed: onRemove,
-                  icon: const Icon(Icons.close, size: 20),
-                )
-              else
-                const SizedBox(width: 8),
             ],
           ),
         ),

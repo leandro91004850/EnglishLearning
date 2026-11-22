@@ -1,15 +1,15 @@
-import 'dart:io';
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../api/api_client.dart';
+import '../core/log.dart';
 import '../core/subtitles.dart';
 import '../youtube/video_id.dart';
-import 'banco.dart';
-import 'json_file.dart';
 
-const Duration historySaveEvery = Duration(seconds: 15); // entre gravações da posição do vídeo
+const Duration historySaveEvery = Duration(seconds: 15); // entre os envios da posição do vídeo
 
-/// Um vídeo da lista de recentes. Mesmo formato do `historico.json` do app.py:
+/// Um vídeo da lista de recentes. Mesmo formato do `historico.json` do app.py e da API:
 /// `{id, url, source, at, title, author, pos, dur}`.
 class HistoryItem {
   HistoryItem({
@@ -57,91 +57,32 @@ class HistoryItem {
 
   /// Onde retomar: a posição salva, menos se estiver bem no começo ou no fim.
   double get resumeAt => pos > 5 && (dur <= 0 || pos < dur - 10) ? pos : 0;
-
-  Map<String, Object> toJson() => {
-        'id': id,
-        'url': url,
-        'source': source,
-        'at': at,
-        if (title.isNotEmpty) 'title': title,
-        if (author.isNotEmpty) 'author': author,
-        if (pos > 0) 'pos': pos,
-        if (dur > 0) 'dur': dur,
-      };
 }
 
-/// Lista de vídeos (Recentes), sem limite: com o banco de dados, todos os vídeos
-/// guardados lá (os que estavam fora da lista entram no fim dela a cada leitura).
-/// Link novo entra no topo; vídeo aberto pela própria lista fica no lugar, para
-/// que, quando ele termina, o app siga para o de baixo. Tocar e segurar um vídeo
-/// e arrastar muda a ordem ([reorder]). `at` diz quando cada um foi aberto pela
-/// última vez.
-///
-/// Com o banco de dados ([attach]), a lista vai para o banco numa fila à parte
-/// (o `History` do app.py do legendas-yt): inteira quando ela muda (vídeo novo,
-/// ordem, remoção); só a linha do vídeo quando muda apenas onde ele parou ou o
-/// título. O arquivo historico.json fica como cópia no aparelho, para o app
-/// lembrar dos vídeos mesmo sem conexão. Ao ler a lista do banco ([loadFromDb]):
-/// se o aparelho estava em dia com o banco, vale a lista do banco (pode ter
-/// mudado no app do computador), e os vídeos mexidos nesta sessão antes disso
-/// ficam no topo; se o aparelho tinha mudanças que não chegaram ao banco, a lista
-/// do aparelho fica por cima e os outros vídeos do banco vêm depois.
+/// A lista de vídeos (Recentes). Vem da API: todos os vídeos do banco de dados, na ordem da
+/// lista e com onde cada um parou. O app guarda só uma cópia na memória, que muda na hora quando
+/// um vídeo é aberto (a API faz o mesmo no banco), arrastado ([reorder], a nova ordem vai para a
+/// API) ou quando ele toca ([update]; onde ele parou vai para a API em [save]).
+/// Link novo entra no topo; vídeo aberto pela própria lista fica no lugar, para que, quando ele
+/// termina, o app siga para o de baixo.
 class History extends ChangeNotifier {
-  History(this.file, {DateTime Function()? now}) : _now = now ?? DateTime.now {
-    _items = _read();
-    _synced = readJson<Map<String, dynamic>>(_syncFile, const {})['sincronizado'] == true;
-    _syncedAtStart = _synced;
-  }
+  History(this.api, {DateTime Function()? now}) : _now = now ?? DateTime.now;
 
-  final File file;
+  final ApiClient api;
   final DateTime Function() _now;
-  late List<HistoryItem> _items;
-  bool _dirty = false;
-  DateTime _savedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  List<HistoryItem> _items = [];
 
-  // ---- banco de dados ----
-  Banco? _db;
-  bool _dbLoaded = false;
+  /// A lista já veio da API pelo menos uma vez.
+  bool loaded = false;
 
-  /// A lista do aparelho é a mesma do banco (gravado em historico-banco.json).
-  late bool _synced;
-  late bool _syncedAtStart;
-
-  /// Vídeos mexidos nesta sessão antes de ler a lista do banco.
-  final Set<String> _touched = {};
-
-  /// A ordem mudou ou um vídeo saiu antes de ler a lista do banco.
-  bool _listChanged = false;
-
-  /// A lista mudou (vídeo novo, ordem, remoção): vai inteira para o banco.
-  bool _dbWhole = false;
-
-  /// Só onde estes vídeos pararam ou o título deles mudou: vão só as linhas deles.
-  final Set<String> _dbRows = {};
-  bool _dbQueued = false;
-  DateTime _dbSavedAt = DateTime.fromMillisecondsSinceEpoch(0);
-
-  bool get _dbDirty => _dbWhole || _dbRows.isNotEmpty;
-
-  File get _syncFile => File('${file.parent.path}/historico-banco.json');
-
-  List<HistoryItem> _read() {
-    final data = readJson<List<dynamic>>(file, const []);
-    final ok = <HistoryItem>[];
-    for (final x in data) {
-      if (x is Map<String, dynamic> && isVideoId(x['id'] is String ? x['id'] as String : null)) {
-        ok.add(HistoryItem.fromJson(x));
-      }
-    }
-    return ok;
-  }
+  final Map<String, HistoryItem> _positions = {}; // onde o vídeo parou, ainda não enviado
+  DateTime _sentAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Future<void> _sending = Future.value();
+  Future<void> _ordering = Future.value();
+  List<String> _sentOrder = const []; // a ordem que a API já tem
 
   /// Os vídeos, na ordem em que aparecem.
   List<HistoryItem> get items => List.unmodifiable(_items);
-
-  /// O × da lista. Com o banco de dados não há ×: a lista tem todos os vídeos de
-  /// lá, e um vídeo tirado dela voltaria na próxima leitura do banco.
-  bool get canRemove => !(_db?.configured ?? false);
 
   bool get isEmpty => _items.isEmpty;
 
@@ -158,40 +99,32 @@ class History extends ChangeNotifier {
   HistoryItem? get latest =>
       _items.isEmpty ? null : _items.reduce((a, b) => b.at > a.at ? b : a);
 
-  /// [whole]: a lista mudou, e não só onde o vídeo [id] parou ou o título dele.
-  void _changed({String? id, bool whole = true}) {
-    _dirty = true;
-    if (whole) {
-      _dbWhole = true;
-    } else if (id != null) {
-      _dbRows.add(id);
+  /// Lê a lista da API. Devolve o problema ("" = tudo certo): a API fora do ar, ou o banco de
+  /// dados dela com problema (aí a lista vem vazia).
+  Future<String> load() async {
+    try {
+      final list = await api.recent();
+      _items = [
+        for (final m in list.videos)
+          if (isVideoId(m['id'] is String ? m['id'] as String : null)) HistoryItem.fromJson(m),
+      ];
+      _sentOrder = [for (final x in _items) x.id];
+      loaded = true;
+      notifyListeners();
+      return list.dbMessage;
+    } on ApiFailure catch (e) {
+      Log.warning('Lista de vídeos: ${e.message}');
+      return e.message;
     }
-    if (!_dbLoaded) {
-      if (id != null) {
-        _touched.add(id);
-      } else {
-        _listChanged = true;
-      }
-    }
-    _setSynced(false);
   }
 
-  void _setSynced(bool value) {
-    if (_synced == value) return;
-    _synced = value;
-    writeJson(_syncFile, {'sincronizado': value});
-  }
-
-  /// Vídeo aberto agora. Sem [keepPlace] (link colado), vai para o topo; com
-  /// [keepPlace] (aberto pela lista, ou o mesmo vídeo de novo), fica onde está e,
-  /// se tinha saído da lista, não volta. [restoring]: o app reabriu o último
-  /// vídeo ao iniciar (não conta como mudança da lista). Devolve true se ainda
-  /// não tem título.
-  bool opened(String videoId, String source, {bool keepPlace = false, bool restoring = false}) {
+  /// Vídeo aberto agora. Sem [keepPlace] (link colado), vai para o topo; com [keepPlace] (aberto
+  /// pela lista, ou o mesmo vídeo de novo), fica onde está. [restoring]: o app reabriu o último
+  /// vídeo ao iniciar (a lista não muda).
+  void opened(String videoId, String source, {bool keepPlace = false, bool restoring = false}) {
+    if (restoring) return;
     var item = find(videoId);
-    if (item == null && keepPlace) return false;
-    final needTitle = (item?.title ?? '').isEmpty;
-    if (restoring && item != null) return needTitle;
+    if (item == null && keepPlace) return;
     if (item == null) {
       item = HistoryItem(id: videoId);
       _items.insert(0, item);
@@ -203,152 +136,82 @@ class History extends ChangeNotifier {
       ..url = watchUrlFor(videoId)
       ..source = source
       ..at = _now().millisecondsSinceEpoch ~/ 1000;
-    _changed(id: videoId);
-    save();
     notifyListeners();
-    return needTitle;
   }
 
-  /// Tira o vídeo da lista. Devolve true se ele estava lá.
-  bool remove(String videoId) {
-    final before = _items.length;
-    _items.removeWhere((x) => x.id == videoId);
-    if (_items.length == before) return false;
-    _changed();
-    save();
-    notifyListeners();
-    return true;
-  }
-
-  /// Sobe (delta < 0) ou desce (delta > 0) o vídeo na lista, sem mudar o `at`.
-  /// Devolve true se ele mudou de lugar.
+  /// Sobe (delta < 0) ou desce (delta > 0) o vídeo na lista. Devolve true se ele mudou de lugar.
   bool move(String videoId, int delta) {
     final i = indexOf(videoId);
     return i >= 0 && reorder(i, i + delta);
   }
 
-  /// Leva o vídeo da posição [from] para a posição [to] (arrastando na lista),
-  /// sem mudar o `at`. Devolve true se ele mudou de lugar.
+  /// Leva o vídeo da posição [from] para a posição [to] (arrastando na lista), sem mudar o `at`,
+  /// e manda a nova ordem para a API. Devolve true se ele mudou de lugar.
   bool reorder(int from, int to) {
     if (from < 0 || from >= _items.length) return false;
     final j = to.clamp(0, _items.length - 1);
     if (j == from) return false;
     _items.insert(j, _items.removeAt(from));
-    _changed();
-    save();
     notifyListeners();
+    // uma de cada vez, sempre com a ordem mais nova
+    _ordering = _ordering.then((_) => _sendOrder());
     return true;
   }
 
-  /// Atualiza título ou posição de um vídeo, sem mudar a ordem.
+  Future<void> _sendOrder() async {
+    final ids = [for (final x in _items) x.id];
+    if (listEquals(ids, _sentOrder)) return; // outro envio já levou esta ordem
+    try {
+      await api.reorder(ids);
+      _sentOrder = ids;
+    } on ApiFailure catch (e) {
+      Log.warning('Nova ordem da lista: ${e.message}');
+    }
+  }
+
+  /// Título ou posição de um vídeo, sem mudar a ordem. A posição vai para a API em [save].
   void update(String videoId, {String? title, String? author, double? pos, double? dur}) {
     final item = find(videoId);
     if (item == null) return;
+    if (title == item.title && (author == null || author == item.author) && pos == null && dur == null) return;
     if (title != null) item.title = title;
     if (author != null) item.author = author;
     if (pos != null) item.pos = pos;
     if (dur != null) item.dur = dur;
-    _changed(id: videoId, whole: false);
+    if (pos != null || dur != null) _positions[videoId] = item;
     notifyListeners();
   }
 
-  /// Grava se algo mudou (no aparelho e, com o banco, na fila do banco); com
-  /// `force: false`, no máximo a cada [historySaveEvery].
+  /// Manda para a API onde os vídeos pararam; com `force: false`, no máximo a cada
+  /// [historySaveEvery]. Volta na hora (o envio segue sozinho; [flush] espera).
   void save({bool force = true}) {
-    _saveLocal(force: force);
-    _queueDb(force: force);
+    if (_positions.isEmpty) return;
+    if (!force && _now().difference(_sentAt) < historySaveEvery) return;
+    _sentAt = _now();
+    final batch = List.of(_positions.values);
+    _positions.clear();
+    _sending = _sending.then((_) => _sendPositions(batch));
   }
 
-  void _saveLocal({bool force = true}) {
-    if (!_dirty) return;
-    if (!force && _now().difference(_savedAt) < historySaveEvery) return;
-    if (writeJson(file, [for (final x in _items) x.toJson()])) {
-      _dirty = false;
-      _savedAt = _now();
-    }
-  }
-
-  // ---- banco de dados ----
-
-  void attach(Banco db) => _db = db;
-
-  /// Lê a lista do banco e junta com a do aparelho (veja a explicação da classe).
-  /// Antes, os vídeos do banco que estão fora da lista entram no fim dela
-  /// ([Banco.addMissingVideos]): a lista tem todos. Devolve false se o banco não
-  /// respondeu.
-  Future<bool> loadFromDb() async {
-    final db = _db;
-    if (db == null || !db.configured) return false;
-    if (_dbLoaded) return true;
-    await db.addMissingVideos();
-    final saved = await db.loadRecent();
-    if (saved == null) return false;
-    if (_dbLoaded) return true; // outra chamada leu enquanto esta esperava
-    final fromDb = <HistoryItem>[];
-    for (final m in saved) {
-      if (isVideoId(m['id'] is String ? m['id'] as String : null)) {
-        fromDb.add(HistoryItem.fromJson(Map<String, dynamic>.from(m)));
+  Future<void> _sendPositions(List<HistoryItem> batch) async {
+    for (final x in batch) {
+      try {
+        await api.position(x.id, x.pos, x.dur);
+      } on ApiFailure catch (e) {
+        Log.warning('Posição de ${x.id}: ${e.message}');
+        _positions.putIfAbsent(x.id, () => x); // vai de novo no próximo envio
       }
     }
-    final keep = _syncedAtStart && !_listChanged
-        ? [for (final x in _items) if (_touched.contains(x.id)) x]
-        : List.of(_items);
-    final ids = {for (final x in keep) x.id};
-    _items = [...keep, ...fromDb.where((x) => !ids.contains(x.id))];
-    _dbLoaded = true;
-    _touched.clear();
-    _listChanged = false;
-    if (keep.isEmpty) {
-      _setSynced(true);
-    } else {
-      _dbWhole = true;
+  }
+
+  /// Manda o que falta e espera (ao fechar o app). False se o tempo acabou antes.
+  Future<bool> flush([Duration timeout = const Duration(seconds: 5)]) async {
+    save();
+    try {
+      await Future.wait([_sending, _ordering]).timeout(timeout);
+      return true;
+    } on TimeoutException {
+      return false;
     }
-    _dirty = true;
-    _saveLocal();
-    notifyListeners();
-    return true;
-  }
-
-  void _queueDb({required bool force}) {
-    final db = _db;
-    if (db == null || !db.configured || !_dbDirty || _dbQueued) return;
-    if (!force && _now().difference(_dbSavedAt) < historySaveEvery) return;
-    _dbQueued = true;
-    if (!db.submit(_writeDb)) _dbQueued = false;
-  }
-
-  /// Na fila do banco. A lista mudou: grava a lista inteira numa transação;
-  /// senão, só as linhas dos vídeos que mudaram. Se o banco estava fora do ar na
-  /// abertura, antes junta a lista que está lá.
-  Future<void> _writeDb() async {
-    _dbQueued = false;
-    final db = _db;
-    if (db == null) return;
-    if (!_dbLoaded && !await loadFromDb()) return; // ainda fora do ar: as mudanças continuam marcadas
-    final whole = _dbWhole;
-    final rows = Set.of(_dbRows);
-    final items = [for (final x in _items) if (whole || rows.contains(x.id)) x.toJson()];
-    _dbWhole = false;
-    _dbRows.clear();
-    _dbSavedAt = _now();
-    if (await (whole ? db.saveRecent(items) : db.updateRecent(items))) {
-      if (!_dbDirty) _setSynced(true);
-    } else {
-      _dbWhole = _dbWhole || whole;
-      _dbRows.addAll(rows);
-    }
-  }
-
-  /// Os dados de acesso do banco mudaram: a lista do aparelho vai por cima da
-  /// lista do banco novo na próxima leitura.
-  void dbReset() {
-    _dbLoaded = false;
-    _syncedAtStart = false;
-    _touched.clear();
-    _listChanged = false;
-    _dbWhole = true;
-    _setSynced(false);
-    notifyListeners(); // o × aparece ou some ([canRemove])
   }
 }
-

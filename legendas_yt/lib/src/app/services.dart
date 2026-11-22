@@ -6,164 +6,122 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../api/api_client.dart';
+import '../api/api_settings.dart';
 import '../core/diagnostics.dart';
 import '../core/log.dart';
-import '../data/banco.dart';
 import '../data/history.dart';
 import '../data/prefs.dart';
-import '../data/translation_cache.dart';
-import '../translation/translator.dart';
-import '../youtube/transcript_api.dart';
 import 'session.dart';
 
-/// Tudo o que o app usa, criado uma vez na abertura. Os arquivos ficam na
-/// pasta de dados do app (o `data_dir()` do app.py): historico.json,
-/// preferencias.json, legendas-yt.log, cache/ e o .env com os dados de acesso
-/// ao banco de dados (PostgreSQL).
+/// Tudo o que o app usa, criado uma vez na abertura. O app é só um consumidor da API do Legendas
+/// YT: a lista de vídeos, as preferências e as legendas com a tradução vêm de lá. No aparelho
+/// ficam só o endereço da API (servidor.json) e o registro (legendas-yt.log).
 class AppServices {
   AppServices._({
     required this.dir,
-    required this.envFile,
-    required this.banco,
+    required this.settingsFile,
+    required this.client,
+    required this.api,
     required this.history,
     required this.prefs,
-    required this.cache,
-    required this.translation,
-    required this.transcripts,
     required this.session,
-  }) {
-    banco.onStatus = (message) => dbStatus.value = message;
-  }
+  });
 
-  static Future<AppServices> create({Directory? dir, http.Client? client, Banco? banco}) async {
+  static Future<AppServices> create({Directory? dir, http.Client? client}) async {
     final base = dir ?? await getApplicationSupportDirectory();
     Log.openFile(File('${base.path}/legendas-yt.log'));
     if (kDebugMode) Log.echo = debugPrint;
 
-    final http.Client c = client ??
-        IOClient(HttpClient()..connectionTimeout = const Duration(seconds: 6));
-    final envFile = File('${base.path}/.env');
-    final db = banco ?? Banco.fromEnv(envFile, mobile: !kIsWeb && (Platform.isIOS || Platform.isAndroid));
-    final history = History(File('${base.path}/historico.json'))..attach(db);
-    final prefs = Prefs(File('${base.path}/preferencias.json'))..attach(db);
-    final cache = TranslationCache(Directory('${base.path}/cache'));
-    unawaited(cache.prune({for (final x in history.items) x.id}));
-    final translation = TranslationService(client: c);
-    final transcripts = TranscriptApi(client: c);
+    final http.Client c = client ?? IOClient(HttpClient()..connectionTimeout = const Duration(seconds: 6));
+    final settingsFile = File('${base.path}/servidor.json');
+    final api = ApiClient(
+      c,
+      ApiSettings.read(settingsFile),
+      mobile: !kIsWeb && (Platform.isIOS || Platform.isAndroid),
+    );
+    final history = History(api);
     final services = AppServices._(
       dir: base,
-      envFile: envFile,
-      banco: db,
+      settingsFile: settingsFile,
+      client: c,
+      api: api,
       history: history,
-      prefs: prefs,
-      cache: cache,
-      translation: translation,
-      transcripts: transcripts,
-      session: SubtitleSession(
-        history: history,
-        cache: cache,
-        transcripts: transcripts,
-        translation: translation,
-        client: c,
-        banco: db,
-      ),
+      prefs: Prefs(api),
+      session: SubtitleSession(api: api, history: history),
     );
-    unawaited(services.openDb()); // na abertura, sem segurar a tela
+    services.ready = services.connect(); // na abertura, sem segurar a tela
     return services;
   }
 
   final Directory dir;
 
-  /// Os dados de acesso ao banco (oculto, só na pasta de dados do app).
-  final File envFile;
-  final Banco banco;
+  /// O endereço da API e a chave de acesso (na pasta privada do app).
+  final File settingsFile;
+
+  /// O HTTP do app (os testes trocam por um de mentira).
+  final http.Client client;
+  final ApiClient api;
   final History history;
   final Prefs prefs;
-  final TranslationCache cache;
-  final TranslationService translation;
-  final TranscriptApi transcripts;
   final SubtitleSession session;
 
-  /// Problema com o banco de dados, para o aviso na tela ("" = tudo certo).
-  final ValueNotifier<String> dbStatus = ValueNotifier('');
+  /// A primeira leitura da lista de vídeos e das preferências terminou (deu certo ou não).
+  late Future<void> ready;
 
-  Diagnostics diagnostics() => Diagnostics(translation: translation, transcripts: transcripts, banco: banco);
+  /// Problema com a API ou com o banco de dados dela, para o aviso na tela ("" = tudo certo).
+  final ValueNotifier<String> apiStatus = ValueNotifier('');
 
-  /// Conecta ao banco e lê a lista de recentes e as preferências (na abertura do
-  /// app e quando os dados de acesso mudam pela tela).
-  Future<void> openDb() async {
-    if (!banco.configured) return;
-    try {
-      await history.loadFromDb();
-      await prefs.loadFromDb();
-      history.save(); // o que ficou só no aparelho vai para o banco
-    } catch (e) {
-      Log.warning('Abertura do banco de dados: $e');
+  ApiSettings get settings => api.settings;
+
+  Diagnostics diagnostics() => Diagnostics(api);
+
+  /// Lê a lista de vídeos e as preferências da API (na abertura e quando o endereço muda).
+  Future<void> connect() async {
+    if (!api.settings.configured) {
+      apiStatus.value = ApiClient.notConfigured;
+      return;
     }
+    apiStatus.value = await history.load();
+    await prefs.load();
   }
 
-  /// Ao fechar o app: grava onde o vídeo parou e espera as gravações pendentes.
+  /// Ao fechar o app: manda onde o vídeo parou e espera os envios pendentes.
   Future<void> shutdown() async {
-    history.save();
-    if (!await banco.flush(const Duration(seconds: 5))) {
-      Log.warning('Banco de dados: o app fechou com gravações pendentes');
-    }
+    if (!await history.flush()) Log.warning('API: o app fechou com envios pendentes');
   }
 
-  // ---- tela do banco de dados ----
+  // ---- tela do servidor ----
 
-  /// Dados de acesso para a tela. A senha não vai para a tela: só se existe.
-  Map<String, Object> dbConfig() {
-    final c = banco.config;
-    String or(String key, String fallback) => (c[key] ?? '').isEmpty ? fallback : c[key]!;
-    return {
-      'host': or('DB_HOST', 'localhost'),
-      'port': or('DB_PORT', '5432'),
-      'dbname': or('DB_NAME', 'legendas_yt'),
-      'user': or('DB_USER', 'postgres'),
-      'sslmode': c['DB_SSLMODE'] ?? '',
-      'hasPassword': (c['DB_PASSWORD'] ?? '').isNotEmpty,
-    };
-  }
-
-  /// Testa os dados da tela sem gravá-los: conecta (criando o banco e as
-  /// tabelas, se faltarem) e conta o que já está guardado.
-  Future<(bool, String)> testDb(Map<String, Object?> form) async {
-    final (config, error) = configFromForm(form, banco.config);
+  /// Testa o endereço e a chave da tela sem gravá-los: a API responde e diz como está o banco.
+  Future<(bool, String)> testServer(String url, String token) async {
+    final (settings, error) = ApiSettings.fromForm(url, token, api.settings);
     if (error.isNotEmpty) return (false, error);
-    final test = Banco(config, mobile: banco.mobile);
+    final test = ApiClient(client, settings, mobile: api.mobile);
     try {
-      final (ok, message) = await test.check();
-      return (ok, ok ? 'Conectou: $message.' : message);
-    } finally {
-      await test.close();
+      final status = await test.status(check: true);
+      final db = status.dbOk
+          ? 'Banco de dados: ${status.dbMessage}.'
+          : 'Mas o banco de dados da API tem um problema: ${status.dbMessage}';
+      return (true, 'Conectou à API ${status.version}. $db');
+    } on ApiFailure catch (e) {
+      return (false, e.message);
     }
   }
 
-  /// Grava os dados da tela no .env e passa a usar esse banco na hora.
+  /// Grava o endereço e a chave da tela e passa a usar essa API na hora.
   /// Devolve (gravou, conectou, mensagem).
-  Future<(bool, bool, String)> saveDb(Map<String, Object?> form) async {
-    final (config, error) = configFromForm(form, banco.config);
+  Future<(bool, bool, String)> saveServer(String url, String token) async {
+    final (settings, error) = ApiSettings.fromForm(url, token, api.settings);
     if (error.isNotEmpty) return (false, false, error);
-    try {
-      writeEnv(envFile, config);
-    } on FileSystemException catch (e) {
-      Log.warning('Não consegui gravar ${envFile.path}: $e');
-      return (false, false, 'Não consegui gravar os dados de acesso: ${e.message}');
+    if (!settings.write(settingsFile)) {
+      return (false, false, 'Não consegui gravar o endereço da API neste aparelho.');
     }
-    Log.info('Banco de dados: dados de acesso trocados pela tela '
-        '(${config['DB_USER']}@${config['DB_HOST']}:${config['DB_PORT']}/${config['DB_NAME']})');
-    history.save(); // o que ainda não tinha ido para o banco anterior vai agora
-    await banco.flush(const Duration(seconds: 5));
-    await banco.reconfigure(config);
-    history.dbReset();
-    prefs.dbReset();
-    await openDb();
-    final (ok, message) = await banco.check();
-    return (
-      true,
-      ok,
-      ok ? 'Gravado. Conectou: $message.' : 'Gravado, mas o app não conseguiu conectar. $message',
-    );
+    Log.info('Servidor (API) trocado pela tela: ${settings.url}');
+    await history.flush(); // o que ainda não tinha ido para a API anterior vai agora
+    api.settings = settings;
+    await connect();
+    final (ok, message) = await testServer(settings.url, '');
+    return (true, ok, ok ? 'Gravado. $message' : 'Gravado, mas o app não conseguiu falar com a API. $message');
   }
 }

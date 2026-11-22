@@ -8,7 +8,7 @@ import 'package:legendas_yt/src/app/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 void main() {
-  testWidgets('abre vazio, em português, e recusa link inválido', (tester) async {
+  testWidgets('abre no menu; Vídeos abre os vídeos, em português, e recusa link inválido', (tester) async {
     final dir = Directory.systemTemp.createTempSync('legendas_widget');
     addTearDown(() => dir.deleteSync(recursive: true));
     final services = (await tester.runAsync(
@@ -17,10 +17,18 @@ void main() {
 
     await tester.pumpWidget(LegendasApp(services: services));
     await tester.pump();
+    expect(find.text('Vídeos'), findsOneWidget);
+    expect(find.text('Formar frases'), findsOneWidget);
+    expect(find.text('Palavras mais usadas'), findsOneWidget);
+    expect(find.textContaining('Servidor não configurado'), findsOneWidget);
 
+    await tester.tap(find.text('Vídeos'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
     expect(find.text('Cole um link do YouTube e toque em Abrir'), findsOneWidget);
     expect(find.text('Abrir'), findsOneWidget);
     expect(find.text('Recentes'), findsOneWidget);
+    expect(find.byTooltip('Menu'), findsOneWidget, reason: 'a seta volta para o menu');
 
     await tester.enterText(find.byType(TextField), 'isto não é um link');
     await tester.tap(find.text('Abrir'));

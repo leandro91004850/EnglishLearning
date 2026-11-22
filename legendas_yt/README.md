@@ -1,88 +1,106 @@
 # Legendas YT (Flutter)
 
-Legendas de vídeos do YouTube com tradução em tempo real (português ⇄ inglês).
-Versão Flutter do `app.py` + `tradutor.py` que estão na pasta de cima.
+Inglês com os vídeos que você assiste: legendas de vídeos do YouTube com tradução em tempo real
+(português ⇄ inglês) e um quiz para formar frases com as falas desses vídeos.
 
-O app abre o vídeo num player do YouTube, baixa a legenda original e mostra,
-no tempo do vídeo, a fala original e a tradução — sobre o vídeo e numa lista de
-falas que acompanha o vídeo (tocar numa fala leva o vídeo até ela).
+O app abre num menu com três caminhos:
+
+- **Vídeos**: o vídeo num player do YouTube com a fala original e a tradução, no tempo do vídeo —
+  sobre o vídeo e numa lista de falas que acompanha o vídeo (tocar numa fala leva o vídeo até ela).
+- **Formar frases**: "Traduza esta frase", como no Duolingo. Uma frase em inglês das suas legendas e a
+  tradução para montar com as fichas, das palavras que mais aparecem nas legendas para as que menos.
+- **Palavras mais usadas**: o ranking das palavras em inglês das suas legendas; tocar numa abre o quiz
+  na frase dela.
+
+No menu ficam também os números do banco (vídeos, falas e palavras diferentes), a próxima palavra do
+quiz e os botões Servidor, Diagnóstico e Sobre.
+
+**O app é só um consumidor da API do Legendas YT** (o servidor em Python, projeto `api_english`):
+a lista de vídeos, as preferências, as legendas com a tradução, as frases do quiz e o diagnóstico vêm
+de lá. O app não fala com o banco de dados, com o Google Tradutor nem com as legendas do YouTube; ele
+só toca o vídeo no player do YouTube.
 
 ## Rodar
+
+1. Ligue a API (veja o README do `api_english`): `python -m legendas_api`.
+2. Rode o app e toque em **Servidor** (no rodapé do menu; na tela dos vídeos, ⋮ › Servidor). Preencha
+   o endereço da API: no simulador do iPhone e no Mac, `http://localhost:8000`; no celular, o endereço
+   (IP) do computador onde a API roda, por exemplo `http://192.168.0.10:8000`. Se a API tiver chave
+   (`API_TOKEN` no `.env` dela), preencha a chave também.
 
 ```bash
 flutter run                      # escolhe o aparelho (iPhone, Android, macOS)
 flutter run -d macos
-flutter test                     # testes (sem internet)
-dart run bin/diagnostico.dart "https://youtu.be/UF8uR6Z6KLc"   # o --diagnostico do app.py
+flutter test                     # testes (sem internet e sem a API: uma API de mentira)
 ```
 
-Plataformas: Android, iOS e macOS. (Web não dá: o navegador bloqueia os pedidos
-ao YouTube. Windows/Linux precisariam de outro pacote de WebView.)
+Plataformas: Android, iOS e macOS. (Web não dá: o player precisa de WebView. Windows/Linux
+precisariam de outro pacote de WebView.)
 
-## Do Python para o Dart
+## Como funciona
 
-| Python | Dart |
+| No app | Na API |
 | --- | --- |
-| `youtube_transcript_api` (página do vídeo → InnerTube como app de Android → XML) | `lib/src/youtube/transcript_api.dart` |
-| `extract_video_id`, `video_title` (oEmbed) | `lib/src/youtube/video_id.dart`, `oembed.dart` |
-| `pick_transcript`, `make_chunks`, `friendly_error`, `language_name` | `lib/src/core/subtitles.dart` |
-| `tradutor.py` (Google em 3 modos, bloqueio por HTTP 429, reserva MyMemory) | `lib/src/translation/translator.dart` |
-| classe `Api` (`load`, `_work`, `focus`, `progress`, novas tentativas) | `lib/src/app/session.dart` |
-| `History`, `Prefs` (`historico.json`, `preferencias.json`, mesmo formato) | `lib/src/data/history.dart`, `prefs.dart` |
-| `ui/index.html` + servidor em `http://localhost` | `lib/src/ui/` (o player é uma página com base `http://localhost/`, sem servidor) |
-| `--diagnostico` | `lib/src/core/diagnostics.dart`, menu ⋮ › Diagnóstico, `bin/diagnostico.dart` |
+| `lib/src/api/api_client.dart`: as chamadas à API e as mensagens de erro | `legendas_api/main.py`: as rotas |
+| `lib/src/ui/menu_page.dart`: o menu, com os números do banco e a próxima palavra do quiz | `GET /palavras` e `GET /quiz` |
+| `lib/src/app/session.dart`: abre o vídeo na API e pergunta pelo andamento da legenda, avisa onde o vídeo está | `legendas_api/servico.py`: busca a legenda (banco ou YouTube) e traduz em lotes, começando pelo trecho onde o vídeo está |
+| `lib/src/data/history.dart`: a lista de vídeos na tela; manda a nova ordem e onde cada vídeo parou | a lista no banco, com todos os vídeos |
+| `lib/src/data/prefs.dart`: tamanho da legenda, o que mostrar e onde o quiz parou | tabela `preferencias` |
+| `lib/src/quiz/quiz_session.dart`: as lições do quiz, conferir a resposta, guardar onde parou | `GET /quiz`: `legendas_api/quiz.py` analisa as falas do banco e monta as frases com as fichas |
+| `lib/src/ui/quiz_page.dart`: a tela "Traduza esta frase"; `lib/src/quiz/speaker.dart`: a voz | — |
+| `lib/src/ui/words_page.dart`: o ranking das palavras | `GET /palavras` |
+| Diagnóstico | `GET /diagnostico`: testa o banco, os tradutores e as legendas do vídeo |
+| `lib/src/ui/`: o player do YouTube (uma página com base `http://localhost/`, sem servidor) e a interface | — |
 
-O que muda em relação ao app.py:
+### Vídeos
 
-- As traduções terminadas também ficam em disco (`cache/`), não só na memória:
-  no celular o sistema fecha o app com frequência, e cada tradução gasta a cota do Google.
-- Recentes não tem limite de vídeos (o app.py guardava só os últimos 30): com o banco de dados, é
-  uma lista só, com todos os vídeos guardados lá, e a aba mostra quantos são. Por isso, com o banco,
-  a lista não tem o × (um vídeo tirado dela voltaria); sem banco, o × tira o vídeo da lista.
-  Tocar e segurar um vídeo e arrastar para cima ou para baixo muda a ordem
-  (no lugar das setas do app.py). Quando um vídeo termina, o app segue para o de baixo —
-  só se o vídeo chegou mesmo ao fim (o player às vezes avisa "terminou" antes da hora).
+- O botão Vídeos do menu volta ao último vídeo, de onde ele parou; a seta no alto volta ao menu.
+- Recentes não tem limite de vídeos: é uma lista só, com todos os vídeos guardados no banco (a aba
+  mostra quantos são), e por isso não tem o × (um vídeo tirado dela voltaria). Tocar e segurar um
+  vídeo e arrastar para cima ou para baixo muda a ordem. Quando um vídeo termina, o app segue para o
+  de baixo — só se o vídeo chegou mesmo ao fim (o player às vezes avisa "terminou" antes da hora).
 - Controles de estudo: fala anterior / repetir / próxima, velocidade e tela cheia.
   No computador: espaço, ← →, R, F, + e −.
 - A legenda automática do próprio YouTube é desligada ao abrir o vídeo (o app já mostra a dele);
   o botão CC do player liga de novo, se quiser.
 - No telefone a interface fica em pé; a tela cheia deita a tela.
+- Com a API fora do ar (ou o banco dela com problema), aparece um aviso vermelho no menu e, na tela dos
+  vídeos, abaixo do status, com um ponto vermelho no ⋮; tocar no aviso abre Servidor. O vídeo toca, mas
+  sem legenda.
 
-Os arquivos ficam na pasta de dados do app: `historico.json`, `preferencias.json`,
-`legendas-yt.log`, `cache/` e o `.env` do banco de dados.
+### Formar frases
 
-## Banco de dados (PostgreSQL)
+- A API passa por todas as falas guardadas no banco (com inglês e português) e conta quantas vezes
+  cada palavra em inglês aparece. O quiz vai da palavra que mais se repete para a que menos: para cada
+  palavra, uma frase curta com ela — a que mais se repete nas legendas (refrões, bordões). A palavra
+  vem destacada na frase, com quantas vezes ela aparece nas suas legendas.
+- A frase é lida em voz alta quando aparece (a voz em inglês do aparelho); o alto-falante lê de novo.
+- Monte a tradução tocando nas fichas, na ordem; tocar numa ficha da resposta devolve ela. Algumas
+  fichas sobram (palavras de outras frases). **VERIFICAR** confere (maiúsculas não contam) e, se errou,
+  mostra a solução certa.
+- Lições de 10 frases; a frase errada volta uma vez no fim da lição. **Ver no vídeo** abre o vídeo da
+  frase, no ponto dela.
+- Onde o quiz parou fica na API (preferência `quizPos`): a próxima lição começa dali, em qualquer
+  aparelho. Praticar uma palavra escolhida no ranking não muda onde o quiz parou. Feitas todas as
+  frases, dá para recomeçar do início; vídeos novos trazem frases novas.
 
-A mesma lógica do `banco.py` do projeto [legendas-yt](https://github.com/leandro91004850/legendas-yt),
-com **o mesmo esquema**: o app Python do computador e este app podem usar o mesmo banco. Ficam no
-PostgreSQL a lista de Recentes (com onde cada vídeo parou), as preferências, as legendas de cada vídeo
-com a tradução de cada fala e as palavras de cada fala (tabelas `videos`, `recentes`, `preferencias`,
-`legendas`, `legendas_escolhidas`, `frases`, `palavras`, `frases_palavras` e a view `frases_en_pt`).
-Um vídeo que já foi aberto volta do banco na hora, sem baixar a legenda nem traduzir de novo; se a
-tradução tinha parado no meio, o app traduz só o que falta.
+### Palavras mais usadas
 
-A lista de Recentes tem todos os vídeos do banco, sem limite. Sempre que o app lê a lista, os vídeos do
-banco que não estão nela entram no fim, os mais novos primeiro: os que uma versão antiga, ainda com o
-limite de 30, cortou, e os tirados com × no app Python (o app Python grava a lista do banco, então ele
-também passa a mostrar todos). Enquanto um vídeo toca, só a posição dele vai para o banco, não a lista
-inteira.
+As 300 palavras em inglês que mais aparecem nas suas legendas, com quantas vezes e em quantas falas. O
+botão verde abre o quiz na frase da palavra.
 
-1. No app, abra **⋮ › Banco de dados** e preencha servidor, porta, banco, usuário e senha.
-   **Testar** conecta sem gravar nada; **Salvar** grava e o app passa a usar esse banco na hora.
-   Servidor na nuvem: escolha **Exigir** em "Conexão segura (SSL)".
-2. Os dados de acesso ficam num arquivo `.env` na pasta privada do app, no aparelho (o modelo, sem
-   senha, é o `.env.example`). Se o banco `legendas_yt` não existir, o app tenta criá-lo; as tabelas
-   ele cria sozinho.
-3. **No celular**, "localhost" é o próprio celular: use o endereço (IP) do computador onde está o
-   PostgreSQL, e deixe o servidor aceitar conexões da rede (`listen_addresses` no
-   `postgresql.conf` e uma linha para a rede no `pg_hba.conf`). No iPhone, o iOS pede permissão de
-   "Rede Local" na primeira conexão.
+No aparelho ficam só o `servidor.json` (endereço e chave da API) e o `legendas-yt.log`, na pasta de
+dados do app.
 
-Sem banco (não configurado ou fora do ar) o app funciona e guarda tudo no aparelho; com problema, aparece
-um aviso vermelho abaixo do status e um ponto vermelho no ⋮. Quando o banco volta, o que foi feito no
-aparelho vai para lá: os vídeos mexidos ficam por cima da lista do banco. As gravações vão numa fila, sem
-travar a tela; o diagnóstico (⋮ › Diagnóstico, ou `dart run bin/diagnostico.dart` com um `.env` nesta
-pasta) testa o banco primeiro e conta o que já está guardado.
+## Servidor (API)
+
+- **No celular**, "localhost" é o próprio celular: use o endereço (IP) do computador onde a API roda,
+  e deixe a API escutar na rede (`API_HOST=0.0.0.0`, o padrão). No iPhone, o iOS pede permissão de
+  "Rede Local" na primeira conexão.
+- O app aceita `http://` (rede de casa) e `https://`. Fora de casa, ponha a API atrás de HTTPS e use
+  uma chave (`API_TOKEN`).
+- O banco de dados (PostgreSQL) agora é configurado só na API, no `.env` dela: o mesmo banco do app
+  Python legendas-yt.
 
 ## Ícone
 

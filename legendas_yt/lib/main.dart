@@ -1,11 +1,11 @@
 import 'package:material_ui/material_ui.dart';
 
 import 'src/app/services.dart';
-import 'src/ui/home_page.dart';
+import 'src/ui/menu_page.dart';
 import 'src/ui/theme.dart';
 
-/// Legendas YT — legendas de vídeos do YouTube com tradução em tempo real
-/// (português ⇄ inglês). Versão Flutter do app.py + tradutor.py.
+/// Legendas YT — legendas de vídeos do YouTube com tradução em tempo real (português ⇄ inglês)
+/// e o quiz "Formar frases" com as frases das legendas. Consumidor da API do Legendas YT.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final services = await AppServices.create();
@@ -26,7 +26,7 @@ class LegendasApp extends StatelessWidget {
       locale: const Locale('pt', 'BR'),
       supportedLocales: const [Locale('pt', 'BR'), Locale('en')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      home: HomePage(services: services),
+      home: MenuPage(services: services),
     );
   }
 }

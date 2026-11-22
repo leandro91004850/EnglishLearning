@@ -1,6 +1,6 @@
 import 'package:material_ui/material_ui.dart';
 
-enum MenuAction { database, diagnostics, about }
+enum MenuAction { server, diagnostics, about }
 
 const Map<String, String> sourceLabels = {'auto': 'Auto', 'en': 'EN', 'pt': 'PT'};
 
@@ -15,7 +15,8 @@ class TopBar extends StatelessWidget {
     required this.onOpen,
     required this.onPaste,
     required this.onMenu,
-    this.dbProblem = false,
+    this.serverProblem = false,
+    this.onBack,
   });
 
   final TextEditingController url;
@@ -26,16 +27,26 @@ class TopBar extends StatelessWidget {
   final VoidCallback onPaste;
   final ValueChanged<MenuAction> onMenu;
 
-  /// Banco de dados configurado, mas com problema: ponto vermelho no menu.
-  final bool dbProblem;
+  /// A API (ou o banco de dados dela) com problema: ponto vermelho no menu.
+  final bool serverProblem;
+
+  /// Volta para o menu inicial (sem ele, a seta não aparece).
+  final VoidCallback? onBack;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Padding(
-      padding: EdgeInsets.fromLTRB(compact ? 8 : 12, 8, compact ? 2 : 6, 8),
+      padding: EdgeInsets.fromLTRB(onBack != null ? 0 : (compact ? 8 : 12), 8, compact ? 2 : 6, 8),
       child: Row(
         children: [
+          if (onBack != null)
+            IconButton(
+              tooltip: 'Menu',
+              visualDensity: compact ? VisualDensity.compact : null,
+              onPressed: onBack,
+              icon: const Icon(Icons.arrow_back),
+            ),
           Expanded(
             child: TextField(
               controller: url,
@@ -81,19 +92,19 @@ class TopBar extends StatelessWidget {
             child: const Text('Abrir'),
           ),
           PopupMenuButton<MenuAction>(
-            tooltip: dbProblem ? 'Mais (banco de dados sem conexão)' : 'Mais',
-            icon: Badge(isLabelVisible: dbProblem, smallSize: 9, child: const Icon(Icons.more_vert)),
+            tooltip: serverProblem ? 'Mais (servidor com problema)' : 'Mais',
+            icon: Badge(isLabelVisible: serverProblem, smallSize: 9, child: const Icon(Icons.more_vert)),
             onSelected: onMenu,
             itemBuilder: (_) => [
               PopupMenuItem(
-                value: MenuAction.database,
+                value: MenuAction.server,
                 child: ListTile(
                   leading: Badge(
-                    isLabelVisible: dbProblem,
+                    isLabelVisible: serverProblem,
                     smallSize: 8,
-                    child: const Icon(Icons.storage_outlined),
+                    child: const Icon(Icons.dns_outlined),
                   ),
-                  title: const Text('Banco de dados'),
+                  title: const Text('Servidor'),
                 ),
               ),
               const PopupMenuItem(

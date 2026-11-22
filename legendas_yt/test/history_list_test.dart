@@ -1,18 +1,15 @@
-import 'dart:io';
-
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:legendas_yt/src/data/history.dart';
 import 'package:legendas_yt/src/ui/widgets/history_list.dart';
 import 'package:material_ui/material_ui.dart';
 
-import 'fake_banco.dart';
+import 'fake_api.dart';
 
 void main() {
-  testWidgets('segurar e arrastar um vídeo muda a ordem; toque rápido abre', (tester) async {
-    final dir = Directory.systemTemp.createTempSync('legendas_drag');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final history = History(File('${dir.path}/historico.json'));
+  testWidgets('segurar e arrastar um vídeo muda a ordem e manda para a API; toque rápido abre', (tester) async {
+    final fake = FakeApi();
+    final history = History(fake.api());
     for (final (id, title) in [
       ('ccccccccccc', 'Vídeo C'),
       ('bbbbbbbbbbb', 'Vídeo B'),
@@ -27,16 +24,12 @@ void main() {
     final opened = <String>[];
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: HistoryList(
-          history: history,
-          currentId: null,
-          onOpen: (item) => opened.add(item.id),
-          onRemove: (_) {},
-        ),
+        body: HistoryList(history: history, currentId: null, onOpen: (item) => opened.add(item.id)),
       ),
     ));
     await tester.pump();
     expect(find.text('Toque e segure um vídeo para arrastar e mudar a ordem.'), findsOneWidget);
+    expect(find.byTooltip('Tirar da lista'), findsNothing, reason: 'a lista tem todos os vídeos do banco: sem ×');
 
     // segura o A e arrasta até depois do C
     final from = tester.getCenter(find.text('Vídeo A'));
@@ -54,30 +47,12 @@ void main() {
 
     expect(order(), ['bbbbbbbbbbb', 'ccccccccccc', 'aaaaaaaaaaa']);
     expect(opened, isEmpty, reason: 'segurar para arrastar não abre o vídeo');
-    expect([for (final x in History(File('${dir.path}/historico.json')).items) x.id], order(),
-        reason: 'a nova ordem já foi gravada');
+    await tester.runAsync(history.flush);
+    expect(fake.orders.last, order(), reason: 'a nova ordem foi para a API');
 
     // um toque rápido continua abrindo o vídeo
     await tester.tap(find.text('Vídeo B'));
     await tester.pumpAndSettle();
     expect(opened, ['bbbbbbbbbbb']);
-  });
-
-  testWidgets('com o banco de dados a lista não tem ×; sem ele, tem', (tester) async {
-    final dir = Directory.systemTemp.createTempSync('legendas_x');
-    addTearDown(() => dir.deleteSync(recursive: true));
-    final history = History(File('${dir.path}/historico.json'))..opened('aaaaaaaaaaa', 'auto');
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: HistoryList(history: history, currentId: null, onOpen: (_) {}, onRemove: (_) {}),
-      ),
-    ));
-    expect(find.byTooltip('Tirar da lista'), findsOneWidget);
-
-    history
-      ..attach(FakeBanco())
-      ..dbReset(); // como depois de gravar os dados de acesso
-    await tester.pump();
-    expect(find.byTooltip('Tirar da lista'), findsNothing);
   });
 }

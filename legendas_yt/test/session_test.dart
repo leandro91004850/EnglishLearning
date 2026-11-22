@@ -1,211 +1,148 @@
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:legendas_yt/src/app/session.dart';
-import 'package:legendas_yt/src/core/cue.dart';
-import 'package:legendas_yt/src/core/subtitles.dart';
-import 'package:legendas_yt/src/data/banco.dart';
 import 'package:legendas_yt/src/data/history.dart';
-import 'package:legendas_yt/src/data/translation_cache.dart';
-import 'package:legendas_yt/src/translation/translator.dart';
-import 'package:legendas_yt/src/youtube/transcript_api.dart';
 
-import 'fake_banco.dart';
-import 'helpers.dart';
+import 'fake_api.dart';
 
 void main() {
-  late Directory dir;
-  late FakeYouTube yt;
-  late List<String> googleBatches; // primeira fala de cada lote que foi ao Google
-  late SubtitleSession session;
+  late FakeApi fake;
   late History history;
-
-  SubtitleSession build({required http.Client translate, Banco? banco}) {
-    history = History(File('${dir.path}/historico.json'));
-    return SubtitleSession(
-      history: history,
-      cache: TranslationCache(Directory('${dir.path}/cache')),
-      transcripts: TranscriptApi(client: yt.client),
-      translation: TranslationService(client: translate),
-      client: MockClient((req) async => http.Response(
-            jsonEncode({'title': 'Um vídeo', 'author_name': 'Um canal'}),
-            200,
-          )),
-      banco: banco,
-    );
-  }
-
-  /// Google que "traduz" pondo cada fala em maiúsculas.
-  http.Client upperGoogle() => MockClient((req) async {
-        final q = req.url.queryParameters['q']!;
-        final lines = q.split('\n');
-        googleBatches.add(lines.first);
-        return http.Response.bytes(
-          utf8.encode(jsonEncode([
-            [
-              for (var i = 0; i < lines.length; i++)
-                [i < lines.length - 1 ? '${lines[i].toUpperCase()}\n' : lines[i].toUpperCase(), lines[i]],
-            ],
-          ])),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        );
-      });
+  late SubtitleSession session;
 
   setUp(() {
-    dir = Directory.systemTemp.createTempSync('legendas_session');
-    googleBatches = [];
-    yt = FakeYouTube(
-      player: playerResponse(tracks: [captionTrack('en', name: 'English'), captionTrack('en', asr: true)]),
-      // a terceira só tem espaços: fica na lista, vazia, e não vai para o tradutor
-      xml: transcriptXml([(1, 2, 'hello\nthere'), (3, 2, 'how are you'), (5, 1, ' \n ')]),
-    );
+    fake = FakeApi();
+    history = History(fake.api());
+    session = SubtitleSession(api: fake.api(), history: history, pollEvery: Duration.zero);
   });
-  tearDown(() {
-    session.dispose();
-    dir.deleteSync(recursive: true);
-  });
+  tearDown(() => session.dispose());
 
-  test('busca a legenda, traduz e guarda no cache', () async {
-    session = build(translate: upperGoogle());
-    final r = session.load('https://youtu.be/abcdefghijk?si=x');
-    expect(r.ok, isTrue);
-    expect(r.videoId, 'abcdefghijk');
-    await eventually(() => !session.busy);
+  /// Espera a sessão parar de perguntar à API.
+  Future<void> settle() async {
+    for (var i = 0; i < 200 && session.busy; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    expect(session.busy, isFalse, reason: 'a sessão não terminou');
+  }
 
-    expect(session.cues.map((c) => c.text), ['hello there', 'how are you', '']);
-    expect(session.translations, ['HELLO THERE', 'HOW ARE YOU', null]);
+  test('abre na API e acompanha a legenda até ficar pronta', () async {
+    fake.jobStates = [
+      jobState(message: 'Buscando legendas…'),
+      jobState(
+        message: 'Traduzindo para Português… 50%',
+        withMeta: meta,
+        translations: [
+          [0, 'Olá'],
+        ],
+        total: 1,
+        title: 'Meu vídeo',
+        author: 'Meu canal',
+      ),
+      jobState(
+        message: 'English → Português ✓ (Google)',
+        ready: true,
+        finished: true,
+        translations: [
+          [1, 'mundo'],
+        ],
+        total: 2,
+        title: 'Meu vídeo',
+      ),
+    ];
+    final result = session.load('https://youtu.be/aaaaaaaaaaa?t=30');
+    expect(result.videoId, 'aaaaaaaaaaa');
+    expect(session.busy, isTrue);
+    expect(history.items.single.id, 'aaaaaaaaaaa', reason: 'a lista muda na hora, como na API');
+    await settle();
+
+    expect(fake.opened.single, {
+      'url': 'aaaaaaaaaaa',
+      'escolha': 'auto',
+      'manter_lugar': false,
+      'restaurando': false,
+    });
+    final polls = [for (final r in fake.requests) if (r.url.path == '/legendas/job1') r.url.queryParameters];
+    expect(polls, [
+      {'desde': '0', 'falas': 'true'},
+      {'desde': '0', 'falas': 'true'}, // as falas ainda não tinham chegado
+      {'desde': '1'},
+    ]);
+    expect(session.cues.map((c) => c.text), ['Hello', 'world', '']);
+    expect(session.translations, ['Olá', 'mundo', null]);
+    expect((session.translated, session.toTranslate), (2, 2));
     expect(session.status, 'English → Português ✓ (Google)');
     expect(session.statusError, isFalse);
-    expect(session.meta!.generated, isFalse);
-    expect(googleBatches, hasLength(1));
-
-    // título pelo oEmbed
-    await eventually(() => history.find('abcdefghijk')!.title.isNotEmpty);
-    expect(history.find('abcdefghijk')!.author, 'Um canal');
-
-    // de novo: vem do cache, sem pedir nada
-    final before = yt.requests.length;
-    session.load('abcdefghijk');
-    await eventually(() => !session.busy);
-    expect(session.translations, ['HELLO THERE', 'HOW ARE YOU', null]);
-    expect(yt.requests.length, before);
-    expect(googleBatches, hasLength(1));
+    expect(history.find('aaaaaaaaaaa')!.title, 'Meu vídeo');
   });
 
-  test('traduz primeiro o trecho onde o vídeo está', () async {
-    yt.xml = transcriptXml([for (var i = 0; i < 100; i++) (i * 2.0, 2.0, 'line $i')]);
-    session = build(translate: upperGoogle());
-    session.load('abcdefghijk');
-    session.focus(session.job, 85); // o vídeo está na fala 85
-    await eventually(() => !session.busy);
-    // lotes de 40 falas: [0-39], [40-79], [80-99] -> começa pelo que tem a 85
-    expect(googleBatches, ['line 80', 'line 0', 'line 40']);
-    expect(session.translations.every((t) => t != null && t.startsWith('LINE')), isTrue);
+  test('link inválido: nem chama a API', () {
+    final result = session.load('isto não é um link');
+    expect(result.error, 'Link do YouTube inválido.');
+    expect(fake.requests, isEmpty);
   });
 
-  test('erros viram as mensagens do app.py', () async {
-    yt.player = playerResponse();
-    session = build(translate: upperGoogle());
-    session.load('abcdefghijk');
-    await eventually(() => !session.busy);
+  test('erro da API e API fora do ar aparecem como erro', () async {
+    fake.jobStates = [jobState(message: 'Este vídeo não tem legendas (nem automáticas).', error: true, finished: true)];
+    session.load('aaaaaaaaaaa');
+    await settle();
     expect(session.status, 'Este vídeo não tem legendas (nem automáticas).');
     expect(session.statusError, isTrue);
 
-    expect(session.load('não é um link').error, 'Link do YouTube inválido.');
+    fake.down = true;
+    session.load('bbbbbbbbbbb');
+    await settle();
+    expect(session.status, startsWith('Sem conexão com a API'));
+    expect(session.statusError, isTrue);
+
+    fake
+      ..down = false
+      ..jobStates = []; // a API reiniciou e esqueceu a legenda
+    session.load('ccccccccccc');
+    await settle();
+    expect(session.status, 'Legenda não encontrada: abra o vídeo de novo.');
   });
 
-  test('source "pt" prefere a faixa em português e traduz para inglês', () async {
-    yt.player = playerResponse(tracks: [captionTrack('en', name: 'English'), captionTrack('pt', asr: true)]);
-    session = build(translate: upperGoogle());
-    session.load('abcdefghijk', source: 'pt');
-    await eventually(() => !session.busy);
-    expect(session.meta!.sourceCode, 'pt');
-    expect(session.meta!.target, 'en');
-    expect(session.status, 'pt → English ✓ (Google)');
+  test('o mesmo vídeo de novo (troca de idioma) fica no lugar; reabrir ao iniciar avisa a API', () async {
+    session.load('aaaaaaaaaaa');
+    await settle();
+    session.load('aaaaaaaaaaa', source: 'pt');
+    await settle();
+    session.load('bbbbbbbbbbb', keepPlace: true, restoring: true);
+    await settle();
+    expect([for (final o in fake.opened) (o['escolha'], o['manter_lugar'], o['restaurando'])], [
+      ('auto', false, false),
+      ('pt', true, false),
+      ('auto', true, true),
+    ]);
   });
 
-  group('com o banco de dados', () {
-    test('legenda que o banco já tem: sem YouTube, e só traduz o que falta', () async {
-      final db = FakeBanco()
-        ..stored = SavedTrack(
-          id: 42,
-          db: 0,
-          meta: const SubtitleMeta(
-            cues: [Cue(1, 2, 'hello there'), Cue(3, 2, 'how are you')],
-            sourceName: 'English',
-            sourceCode: 'en',
-            generated: false,
-            target: 'pt',
-            targetName: 'Português',
-          ),
-          translations: [(0, 'olá')],
-        );
-      session = build(translate: upperGoogle(), banco: db);
-      session.load('abcdefghijk');
-      await eventually(() => !session.busy);
-      await db.flush();
+  test('avisa a API onde o vídeo está, e manda onde ele parou', () async {
+    fake.videos = [video('aaaaaaaaaaa')];
+    await history.load();
+    fake.jobStates = [jobState(message: 'Traduzindo…', withMeta: meta), jobState(finished: true, ready: true)];
+    session.load('aaaaaaaaaaa');
+    session.focus(session.job, 7);
+    session.focus(session.job - 1, 99); // de um job antigo: não vale
+    await settle();
+    expect(fake.focuses, [7]);
 
-      expect(yt.requests, isEmpty, reason: 'a legenda veio do banco');
-      expect(session.translations, ['olá', 'HOW ARE YOU']);
-      expect(googleBatches, ['how are you']);
-      expect(db.translationsSaved, [(1, 'HOW ARE YOU')]);
-      expect(session.status, 'English → Português ✓ (Google + banco de dados)');
-    });
+    session.progress('aaaaaaaaaaa', 42.04, 600);
+    await history.flush();
+    expect(fake.positions, [('aaaaaaaaaaa', 42.0, 600.0)]);
+    session.progress('curto', 1, 2);
+    session.progress('aaaaaaaaaaa', double.nan, 2);
+    await history.flush();
+    expect(fake.positions, hasLength(1));
+  });
 
-    test('tudo traduzido no banco: nem o tradutor é chamado', () async {
-      final db = FakeBanco()
-        ..stored = SavedTrack(
-          id: 42,
-          db: 0,
-          meta: const SubtitleMeta(
-            cues: [Cue(1, 2, 'hello')],
-            sourceName: 'English',
-            sourceCode: 'en',
-            generated: true,
-            target: 'pt',
-            targetName: 'Português',
-          ),
-          translations: [(0, 'olá')],
-        );
-      session = build(translate: upperGoogle(), banco: db);
-      session.load('abcdefghijk');
-      await eventually(() => !session.busy);
-      expect(googleBatches, isEmpty);
-      expect(session.status, 'English → Português ✓ (banco de dados)');
-    });
-
-    test('legenda nova: vem do YouTube e vai para o banco, com as traduções', () async {
-      final db = FakeBanco();
-      session = build(translate: upperGoogle(), banco: db);
-      session.load('abcdefghijk', source: 'en');
-      await eventually(() => !session.busy);
-      await db.flush();
-      expect(db.calls, [
-        'findTranscript',
-        'findTrack',
-        'saveTranscript abcdefghijk en 3',
-        'saveTranslations 7',
-      ]);
-      expect(db.translationsSaved, [(0, 'HELLO THERE'), (1, 'HOW ARE YOU')]);
-      expect(session.status, 'English → Português ✓ (Google)');
-    });
-
-    test('legenda já traduzida só no aparelho vai para o banco', () async {
-      final db = FakeBanco();
-      session = build(translate: upperGoogle(), banco: db);
-      session.load('abcdefghijk');
-      await eventually(() => !session.busy);
-      await db.flush();
-      db.calls.clear();
-
-      session.load('abcdefghijk'); // de novo: vem do cache do aparelho
-      await eventually(() => !session.busy);
-      await db.flush();
-      expect(db.calls, ['storeComplete abcdefghijk 2']);
-    });
+  test('abrir outro vídeo para de acompanhar o anterior', () async {
+    fake.jobStates = [jobState(message: 'Traduzindo o primeiro…', withMeta: meta)]; // nunca termina
+    session.load('aaaaaaaaaaa');
+    await pumpEventQueue();
+    fake.jobStates = [jobState(message: 'pronto', ready: true, finished: true)];
+    session.load('bbbbbbbbbbb');
+    await settle();
+    expect(session.videoId, 'bbbbbbbbbbb');
+    expect(session.status, 'pronto');
+    expect(session.cues, isEmpty, reason: 'as falas do primeiro não aparecem no segundo');
   });
 }
