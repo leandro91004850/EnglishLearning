@@ -43,5 +43,12 @@ void main() {
     expect(thousands(5000), '5.000');
     expect(thousands(1234567), '1.234.567');
     expect(thousands(12), '12');
+    final now = DateTime(2026, 11, 22, 18);
+    expect(dayAndTime(DateTime(2026, 11, 22, 13, 5), now: now), 'hoje, 13:05');
+    expect(dayAndTime(DateTime(2026, 11, 21, 9, 30), now: now), 'ontem, 09:30');
+    expect(dayAndTime(DateTime(2026, 11, 2, 9, 30), now: now), '02/11/2026');
+    expect(daysAgo(DateTime(2026, 11, 22, 1), now: now), 'hoje');
+    expect(daysAgo(DateTime(2026, 11, 21, 23), now: now), 'ontem');
+    expect(daysAgo(DateTime(2026, 11, 19, 12), now: now), 'há 3 dias');
   });
 }

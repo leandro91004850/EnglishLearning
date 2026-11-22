@@ -130,6 +130,7 @@ class JobState {
 class QuizItem {
   const QuizItem({
     this.id = 0,
+    this.review,
     required this.position,
     required this.word,
     required this.times,
@@ -160,8 +161,12 @@ class QuizItem {
       videoId: '${video['id'] ?? ''}',
       videoTitle: '${video['titulo'] ?? ''}',
       start: number(video['inicio']).toDouble(),
+      review: json['revisao'] is Map<String, dynamic> ? ReviewInfo.fromJson(json['revisao'] as Map<String, dynamic>) : null,
     );
   }
+
+  /// Na revisão: como você foi nesta palavra até agora.
+  final ReviewInfo? review;
 
   /// O id da frase no banco (é por ele que ela é arquivada).
   final int id;
@@ -200,6 +205,7 @@ class QuizBatch {
     required this.words,
     required this.dbMessage,
     this.archived = 0,
+    this.pending = 0,
   });
 
   factory QuizBatch.fromJson(Map<String, dynamic> json) => QuizBatch(
@@ -212,7 +218,11 @@ class QuizBatch {
         words: json['palavras'] is int ? json['palavras'] as int : 0,
         dbMessage: '${json['banco'] ?? ''}',
         archived: json['arquivadas'] is int ? json['arquivadas'] as int : 0,
+        pending: json['pendentes'] is int ? json['pendentes'] as int : 0,
       );
+
+  /// Na revisão: quantas palavras erradas ainda não foram revisadas.
+  final int pending;
 
   /// Quantas frases estão arquivadas (fora das lições).
   final int archived;
@@ -272,6 +282,95 @@ class WordStats {
   final int phrases;
   final int quizItems;
   final String dbMessage;
+}
+
+/// O histórico de uma palavra da revisão.
+class ReviewInfo {
+  const ReviewInfo({required this.right, required this.wrong, required this.lastTest, required this.pending});
+
+  factory ReviewInfo.fromJson(Map<String, dynamic> json) => ReviewInfo(
+        right: json['acertos'] is int ? json['acertos'] as int : 0,
+        wrong: json['erros'] is int ? json['erros'] as int : 0,
+        lastTest: DateTime.tryParse('${json['ultimo_teste'] ?? ''}'),
+        pending: json['pendente'] == true,
+      );
+
+  final int right;
+  final int wrong;
+  final DateTime? lastTest;
+
+  /// Errada e ainda não revisada (a última resposta foi um erro).
+  final bool pending;
+}
+
+/// Como você foi numa palavra nas lições: acertos, erros e o último teste.
+class WordResult {
+  const WordResult({
+    required this.word,
+    required this.right,
+    required this.wrong,
+    required this.lastTest,
+    required this.lastRight,
+    this.item,
+  });
+
+  factory WordResult.fromJson(Map<String, dynamic> json) => WordResult(
+        word: '${json['palavra'] ?? ''}',
+        right: json['acertos'] is int ? json['acertos'] as int : 0,
+        wrong: json['erros'] is int ? json['erros'] as int : 0,
+        lastTest: DateTime.tryParse('${json['ultimo_teste'] ?? ''}'),
+        lastRight: json['ultimo_resultado'] == true,
+        item: json['item'] is int ? json['item'] as int : null,
+      );
+
+  final String word;
+  final int right;
+  final int wrong;
+
+  /// Quando a palavra caiu numa lição pela última vez, e se você acertou.
+  final DateTime? lastTest;
+  final bool lastRight;
+
+  /// Onde praticar a palavra no quiz (de 0); null se a frase dela não está nas lições.
+  final int? item;
+
+  int get total => right + wrong;
+
+  /// A parte das respostas certas (0 a 1).
+  double get rate => total == 0 ? 0 : right / total;
+}
+
+class WordResults {
+  const WordResults({
+    required this.words,
+    required this.right,
+    required this.wrong,
+    required this.lastTest,
+    this.toReview = 0,
+    this.pending = 0,
+  });
+
+  factory WordResults.fromJson(Map<String, dynamic> json) => WordResults(
+        words: [
+          for (final w in json['palavras'] as List? ?? const [])
+            if (w is Map<String, dynamic>) WordResult.fromJson(w),
+        ],
+        right: json['acertos'] is int ? json['acertos'] as int : 0,
+        wrong: json['erros'] is int ? json['erros'] as int : 0,
+        lastTest: DateTime.tryParse('${json['ultimo_teste'] ?? ''}'),
+        toReview: json['revisar'] is int ? json['revisar'] as int : 0,
+        pending: json['pendentes'] is int ? json['pendentes'] as int : 0,
+      );
+
+  /// Quantas palavras estão para revisar, e quantas delas são erradas ainda não revisadas.
+  final int toReview;
+  final int pending;
+
+  /// As palavras já testadas, a do teste mais recente primeiro.
+  final List<WordResult> words;
+  final int right;
+  final int wrong;
+  final DateTime? lastTest;
 }
 
 /// Uma frase arquivada: ela não aparece mais nas lições.
@@ -363,6 +462,23 @@ class ApiClient {
   /// As palavras em inglês que mais se repetem nas legendas do banco.
   Future<WordStats> words({int count = 100}) async =>
       WordStats.fromJson(await _call('GET', '/palavras', query: {'quantidade': '$count'}, timeout: diagnoseTimeout));
+
+  /// Guarda o resultado de uma frase da lição na palavra dela (mais um acerto ou erro).
+  Future<void> recordResult(String word, {required bool correct}) =>
+      _call('POST', '/resultados', body: {'palavra': word, 'acertou': correct});
+
+  /// O ranking das palavras acertadas e erradas nas lições, com o último teste de cada uma.
+  Future<WordResults> results() async {
+    final r = await _call('GET', '/resultados');
+    final message = '${r['banco'] ?? ''}';
+    if (message.isNotEmpty) throw ApiFailure(message);
+    return WordResults.fromJson(r);
+  }
+
+  /// A revisão: primeiro as palavras erradas ainda não revisadas, depois as com mais erros e há mais
+  /// tempo sem revisar.
+  Future<QuizBatch> review({int count = 10}) async =>
+      QuizBatch.fromJson(await _call('GET', '/revisao', query: {'quantidade': '$count'}, timeout: diagnoseTimeout));
 
   /// Arquiva a frase [id]: ela não aparece mais nas lições.
   Future<void> archive(int id) => _call('POST', '/frases/$id/arquivar');

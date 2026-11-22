@@ -15,10 +15,15 @@ void main() {
       () => AppServices.create(dir: dir, client: MockClient((_) async => http.Response('', 500))),
     ))!;
 
+    tester.view
+      ..physicalSize = const Size(1206, 4200) // um celular alto: os quatro cartões cabem na tela
+      ..devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(LegendasApp(services: services));
     await tester.pump();
     expect(find.text('Vídeos'), findsOneWidget);
     expect(find.text('Lições'), findsOneWidget);
+    expect(find.text('Seus resultados'), findsOneWidget);
     expect(find.text('Palavras mais usadas'), findsOneWidget);
     expect(find.textContaining('Servidor não configurado'), findsOneWidget);
 

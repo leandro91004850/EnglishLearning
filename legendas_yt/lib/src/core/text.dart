@@ -77,3 +77,26 @@ String thousands(int n) {
   }
   return out.toString();
 }
+
+/// Data curta para a tela: "hoje, 13:40", "ontem, 09:05" ou "20/11/2026" (na hora local).
+String dayAndTime(DateTime when, {DateTime? now}) {
+  final local = when.toLocal();
+  final today = now ?? DateTime.now();
+  String two(int n) => n.toString().padLeft(2, '0');
+  final time = '${two(local.hour)}:${two(local.minute)}';
+  final day = DateTime(local.year, local.month, local.day);
+  final days = DateTime(today.year, today.month, today.day).difference(day).inDays;
+  if (days == 0) return 'hoje, $time';
+  if (days == 1) return 'ontem, $time';
+  return '${two(local.day)}/${two(local.month)}/${local.year}';
+}
+
+/// Há quanto tempo, em dias: "hoje", "ontem" ou "há 3 dias" (na hora local).
+String daysAgo(DateTime when, {DateTime? now}) {
+  final local = when.toLocal();
+  final today = now ?? DateTime.now();
+  final days = DateTime(today.year, today.month, today.day).difference(DateTime(local.year, local.month, local.day)).inDays;
+  if (days <= 0) return 'hoje';
+  if (days == 1) return 'ontem';
+  return 'há $days dias';
+}

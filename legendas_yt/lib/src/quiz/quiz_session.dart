@@ -13,6 +13,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../api/api_client.dart';
+import '../core/log.dart';
 import '../data/prefs.dart';
 import 'pronunciation.dart';
 import 'voice_input.dart';
@@ -40,6 +41,7 @@ class QuizSession extends ChangeNotifier {
     this.lessonSize = 10,
     this.voice,
     this.speakShare = defaultSpeakShare,
+    this.review = false,
     Random? random,
   }) : _random = random ?? Random.secure(); // Random() repetia o mesmo sorteio a cada vez que o app abria
 
@@ -60,6 +62,19 @@ class QuizSession extends ChangeNotifier {
   final VoiceInput? voice;
   final double speakShare;
   final Random _random;
+
+  /// A revisão: as frases vêm de GET /revisao (as palavras erradas ainda não revisadas primeiro,
+  /// depois as com mais erros e há mais tempo sem revisar), e onde o quiz parou não muda.
+  final bool review;
+
+  /// Revisão: nada para revisar agora.
+  bool nothingToReview = false;
+
+  /// Revisão: quantas palavras estão para revisar, e quantas ainda não foram revisadas.
+  int reviewTotal = 0;
+  int reviewPending = 0;
+
+  final Set<Future<void>> _recording = {}; // respostas indo para a API
 
   bool loading = false;
 
@@ -148,19 +163,26 @@ class QuizSession extends ChangeNotifier {
     lessons++;
     turn++;
     _from = at;
-    _saveProgress = at == null;
+    _saveProgress = at == null && !review;
     _stopListening();
     loading = true;
     error = '';
     completedAll = false;
+    nothingToReview = false;
     notifyListeners();
     final from = at ?? prefs.quizPos;
     try {
-      final batch = await api.quiz(start: from, count: lessonSize);
+      // a revisão depende das últimas respostas: espera elas chegarem na API
+      if (_recording.isNotEmpty) await Future.wait(List.of(_recording));
+      final batch = review ? await api.review(count: lessonSize) : await api.quiz(start: from, count: lessonSize);
       total = batch.total;
+      reviewTotal = review ? batch.total : 0;
+      reviewPending = review ? batch.pending : 0;
       _lesson = [for (final item in batch.items) _Card(item, _draw())];
       if (_lesson.isEmpty) {
-        if (batch.total > 0 && from >= batch.total) {
+        if (review && batch.dbMessage.isEmpty) {
+          nothingToReview = true;
+        } else if (!review && batch.total > 0 && from >= batch.total) {
           completedAll = true;
         } else {
           error = batch.dbMessage.isNotEmpty
@@ -319,10 +341,14 @@ class QuizSession extends ChangeNotifier {
   }
 
   /// Acertou: o quiz passa a começar depois desta frase. Errou: ela volta no fim da lição (uma vez).
+  /// O resultado vai para a API, na palavra da frase (o ranking de acertos e erros).
   void _answer(bool ok) {
     final card = _card!;
     correct = ok;
     answered++;
+    final saving = _record(card.item.word, ok);
+    _recording.add(saving);
+    unawaited(saving.whenComplete(() => _recording.remove(saving)));
     if (ok) {
       right++;
       if (_saveProgress && card.item.position > prefs.quizPos) prefs.quizPos = card.item.position;
@@ -370,6 +396,17 @@ class QuizSession extends ChangeNotifier {
     }
     notifyListeners();
     return true;
+  }
+
+  Future<void> _record(String word, bool ok) async {
+    if (word.isEmpty) return;
+    try {
+      await api.recordResult(word, correct: ok);
+    } on ApiFailure catch (e) {
+      Log.warning('Resultado de "$word" não foi guardado: ${e.message}'); // a lição segue
+    } on Object catch (e) {
+      Log.warning('Resultado de "$word" não foi guardado: $e');
+    }
   }
 
   /// Vai para a próxima frase (depois de responder).

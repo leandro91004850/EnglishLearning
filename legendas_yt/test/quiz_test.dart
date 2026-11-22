@@ -7,6 +7,7 @@ import 'package:legendas_yt/src/data/prefs.dart';
 import 'package:legendas_yt/src/quiz/quiz_session.dart';
 import 'package:legendas_yt/src/quiz/speaker.dart';
 import 'package:legendas_yt/src/ui/archived_page.dart';
+import 'package:legendas_yt/src/ui/results_page.dart';
 import 'package:legendas_yt/src/ui/quiz_page.dart';
 import 'package:legendas_yt/src/ui/theme.dart';
 import 'package:material_ui/material_ui.dart';
@@ -55,6 +56,7 @@ void main() {
       expect((quiz.right, quiz.answered), (2, 3));
       await pumpEventQueue();
       expect(fake.prefs['quizPos'], 2, reason: 'onde o quiz parou foi para a API');
+      expect(fake.answers, [('you', true), ('dad', false), ('dad', true)], reason: 'cada resposta vai para o ranking');
       await quiz.start();
       expect(quiz.current!.word, 'my', reason: 'a próxima lição começa de onde parou');
     });
@@ -139,6 +141,8 @@ void main() {
       await say(['hi']);
       expect(quiz.correct, isFalse);
       expect(prefs.quizPos, 0);
+      await pumpEventQueue();
+      expect(fake.answers, [('you', false)], reason: 'só o resultado final, não cada tentativa');
       quiz.next();
       await say(['my dad']);
       expect(quiz.correct, isTrue);
@@ -273,6 +277,47 @@ void main() {
     });
   });
 
+  group('Revisão', () {
+    late FakeApi fake;
+    late Prefs prefs;
+    late QuizSession quiz;
+
+    setUp(() {
+      fake = FakeApi()
+        ..quizItems = List.of(sampleQuiz)
+        ..answers.addAll([('dad', false), ('you', false), ('dad', false)]); // dad errou 2 vezes, you 1
+      prefs = Prefs(fake.api());
+      quiz = QuizSession(api: fake.api(), prefs: prefs, review: true);
+    });
+
+    void answer(List<String> words) {
+      for (final w in words) {
+        quiz.pick(quiz.current!.tiles.indexOf(w));
+      }
+      quiz.check();
+    }
+
+    test('as erradas ainda não revisadas, as com mais erros antes; onde o quiz parou não muda', () async {
+      prefs.quizPos = 1;
+      await quiz.start();
+      expect(fake.paths, contains('GET /revisao'));
+      expect((quiz.current!.word, quiz.current!.review!.wrong, quiz.current!.review!.pending), ('dad', 2, true));
+      expect((quiz.reviewTotal, quiz.reviewPending), (2, 2));
+      answer(['meu', 'pai']);
+      expect(quiz.correct, isTrue);
+      quiz.next();
+      expect(quiz.current!.word, 'you');
+      answer(['Eu', 'te', 'amo']);
+      quiz.next();
+      expect(quiz.finished, isTrue);
+      expect(prefs.quizPos, 1, reason: 'revisar não muda onde o quiz parou');
+
+      await quiz.start();
+      expect(quiz.nothingToReview, isTrue, reason: 'as duas foram revisadas (as respostas chegaram antes)');
+      expect(quiz.error, isEmpty);
+    });
+  });
+
   Future<AppServices> quizServices(WidgetTester tester, {FakeApi? api}) async {
     final dir = Directory.systemTemp.createTempSync('legendas_quiz');
     addTearDown(() => dir.deleteSync(recursive: true));
@@ -395,6 +440,50 @@ void main() {
     expect(fake.archived, {300});
     expect(find.text('I love you'), findsNothing);
     expect(find.text('Frase restaurada: ela volta a aparecer nas lições.'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('seus resultados: os totais, as mais erradas primeiro e as outras ordens', (tester) async {
+    final fake = FakeApi()..quizItems = List.of(sampleQuiz);
+    fake.answers.addAll([('you', true), ('dad', false), ('you', false), ('my', true), ('dad', false), ('you', true)]);
+    final services = await quizServices(tester, api: fake);
+    await tester.pumpWidget(MaterialApp(theme: buildTheme(), home: ResultsPage(services: services)));
+    await settle(tester);
+    expect(find.text('50%'), findsOneWidget, reason: '3 acertos e 3 erros');
+    expect(find.textContaining('3 palavras testadas'), findsOneWidget);
+    double y(String word) => tester.getTopLeft(find.text(word)).dy;
+
+    expect(find.text('my'), findsNothing, reason: 'mais erradas: só as que já foram erradas');
+    expect(find.byType(ColoredBox), findsWidgets, reason: 'a barra de acertos e erros');
+    expect(y('dad'), lessThan(y('you')), reason: 'dad errou 2 vezes, you 1');
+    expect(find.text('✗ 2'), findsOneWidget);
+
+    await tester.tap(find.text('Acertadas'));
+    await tester.pump();
+    expect(find.text('dad'), findsNothing);
+    expect(y('you'), lessThan(y('my')));
+
+    await tester.tap(find.text('Recentes'));
+    await tester.pump();
+    expect(y('you'), lessThan(y('dad')));
+    expect(y('dad'), lessThan(y('my')), reason: 'o teste mais recente primeiro');
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('revisar: o botão nos resultados abre a revisão, com o histórico da palavra', (tester) async {
+    final fake = FakeApi()
+      ..quizItems = List.of(sampleQuiz)
+      ..answers.addAll([('dad', false), ('dad', false), ('you', true)]);
+    final services = await quizServices(tester, api: fake);
+    await tester.pumpWidget(MaterialApp(theme: buildTheme(), home: ResultsPage(services: services)));
+    await settle(tester);
+    expect(find.text('REVISAR 1 PALAVRA'), findsOneWidget);
+    expect(find.textContaining('Primeiro a errada que você ainda não revisou'), findsOneWidget);
+
+    await tester.tap(find.text('REVISAR 1 PALAVRA'));
+    await settle(tester);
+    expect(find.text('REVISÃO · AINDA NÃO REVISADA'), findsOneWidget);
+    expect(find.textContaining('"dad": você errou 2 de 2 vezes'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 }

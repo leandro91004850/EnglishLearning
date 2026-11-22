@@ -11,6 +11,8 @@ O app abre num menu com três caminhos:
   palavras que mais aparecem nas legendas para as que menos: **Traduza esta frase** (montar a tradução
   com as fichas) e **Repita esta frase** (falar a frase; o reconhecimento de voz do aparelho confere a
   pronúncia).
+- **Seus resultados**: o ranking das palavras que você acertou e errou nas lições, com o dia do último
+  teste; tocar numa palavra pratica de novo. Daqui sai a **revisão** das palavras que você errou.
 - **Palavras mais usadas**: o ranking das palavras em inglês das suas legendas; tocar numa abre o quiz
   na frase dela.
 
@@ -52,6 +54,7 @@ precisariam de outro pacote de WebView.)
 | `lib/src/ui/quiz_page.dart`: a tela das lições ("Traduza" e "Repita esta frase"); `lib/src/quiz/speaker.dart`: a voz que lê a frase | — |
 | `lib/src/quiz/voice_input.dart`: o microfone (o reconhecimento de voz do aparelho); `lib/src/quiz/pronunciation.dart`: confere a pronúncia | — |
 | `lib/src/ui/words_page.dart`: o ranking das palavras | `GET /palavras` |
+| `lib/src/ui/results_page.dart`: o ranking dos seus resultados e o botão da revisão; as lições mandam cada resposta | `GET /resultados`, `POST /resultados` (tabela `resultados_palavras`) e `GET /revisao` |
 | `lib/src/ui/archived_page.dart`: as frases arquivadas | `GET /frases/arquivadas`; arquivar e restaurar: `POST` e `DELETE /frases/{id}/arquivar` |
 | Diagnóstico | `GET /diagnostico`: testa o banco, os tradutores e as legendas do vídeo |
 | `lib/src/ui/`: o player do YouTube (uma página com base `http://localhost/`, sem servidor) e a interface | — |
@@ -107,6 +110,28 @@ precisariam de outro pacote de WebView.)
 - Onde o quiz parou fica na API (preferência `quizPos`): a próxima lição começa dali, em qualquer
   aparelho. Praticar uma palavra escolhida no ranking não muda onde o quiz parou. Feitas todas as
   frases, dá para recomeçar do início; vídeos novos trazem frases novas.
+
+### Seus resultados
+
+- Cada resposta nas lições conta para a palavra da frase (a palavra destacada): um acerto ou um erro, e
+  a data e a hora do teste. No "Repita esta frase" vale o resultado final, não cada tentativa.
+- Fica no banco, na tabela `resultados_palavras` (palavra, acertos, erros, último teste e se acertou
+  da última vez), pela API: vale para todos os aparelhos.
+- A tela mostra os totais (acertos, erros, a taxa de acerto e o último teste) e o ranking em três
+  ordens: **Erradas** (as que você mais errou, boas para revisar), **Acertadas** e **Recentes**. Cada palavra tem acertos, erros, a barra verde e vermelha, a taxa e o último teste; o
+  botão verde pratica de novo a frase dela.
+
+### Revisão
+
+- Uma lição só com as palavras que você errou (o botão **REVISAR** em Seus resultados, ou "Revisar N
+  palavras" no cartão do menu), na ordem:
+  1. as **erradas ainda não revisadas** (a última resposta foi um erro), as com mais erros antes;
+  2. depois, as que têm erros mas você já acertou de novo, **um dia depois** do último teste: mais erros
+     e mais tempo sem revisar sobem na fila.
+- Cada frase mostra "REVISÃO" e o histórico da palavra ("você errou 2 de 3 vezes · último teste há 3
+  dias"). Os exercícios são os mesmos das lições (traduzir ou repetir), e cada resposta conta no
+  ranking: acertou, a palavra sai da fila até o dia seguinte.
+- Revisar não muda onde as lições pararam. Frases arquivadas ficam fora da revisão.
 
 ### Palavras mais usadas
 

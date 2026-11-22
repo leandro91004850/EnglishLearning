@@ -38,6 +38,7 @@ class QuizPage extends StatefulWidget {
     this.speaker,
     this.voice,
     this.speakShare = QuizSession.defaultSpeakShare,
+    this.review = false,
   });
 
   final AppServices services;
@@ -52,6 +53,10 @@ class QuizPage extends StatefulWidget {
   /// A parte das frases que vira exercício de falar.
   final double speakShare;
 
+  /// A revisão: as palavras erradas ainda não revisadas primeiro, depois as com mais erros e há mais
+  /// tempo sem revisar (onde o quiz parou não muda).
+  final bool review;
+
   @override
   State<QuizPage> createState() => _QuizPageState();
 }
@@ -62,6 +67,7 @@ class _QuizPageState extends State<QuizPage> {
     prefs: widget.services.prefs,
     voice: widget.voice ?? DeviceVoiceInput.instance,
     speakShare: widget.speakShare,
+    review: widget.review,
   );
   late final Speaker speaker = widget.speaker ?? DeviceSpeaker();
   int? _spoken; // a frase (QuizSession.turn) já lida em voz alta
@@ -145,10 +151,12 @@ class _QuizPageState extends State<QuizPage> {
           builder: (context, _) {
             final Widget body;
             if (quiz.loading) {
-              body = const _Message(
+              body = _Message(
                 icon: null,
-                title: 'Analisando as frases das suas legendas…',
-                text: 'As palavras que mais se repetem vêm primeiro.',
+                title: quiz.review ? 'Separando as palavras para revisar…' : 'Analisando as frases das suas legendas…',
+                text: quiz.review
+                    ? 'Primeiro as que você errou e ainda não revisou.'
+                    : 'As palavras que mais se repetem vêm primeiro.',
               );
             } else if (quiz.error.isNotEmpty) {
               body = _Message(
@@ -157,6 +165,15 @@ class _QuizPageState extends State<QuizPage> {
                 text: quiz.error,
                 button: 'TENTAR DE NOVO',
                 onButton: () => quiz.start(at: widget.startAt),
+              );
+            } else if (quiz.nothingToReview) {
+              body = _Message(
+                icon: Icons.verified_rounded,
+                title: 'Nada para revisar agora',
+                text: 'Você revisou todas as palavras que errou. As que você já acertou de novo voltam para a '
+                    'revisão um dia depois do último teste.',
+                button: 'VOLTAR',
+                onButton: () => Navigator.of(context).maybePop(),
               );
             } else if (quiz.completedAll) {
               body = _Message(
@@ -174,7 +191,7 @@ class _QuizPageState extends State<QuizPage> {
               body = _Message(
                 icon: Icons.emoji_events_rounded,
                 iconColor: const Color(0xFFFFC800),
-                title: 'Lição completa!',
+                title: quiz.review ? 'Revisão completa!' : 'Lição completa!',
                 text: '${quiz.right} acertos em ${quiz.answered} respostas.',
                 button: 'CONTINUAR',
                 onButton: () => quiz.start(at: widget.startAt == null ? null : widget.startAt! + quiz.lessonSize),
@@ -265,6 +282,7 @@ class _Question extends StatelessWidget {
     final checked = quiz.correct != null;
     final speaking = quiz.exercise == Exercise.speak;
     final check = quiz.speech;
+    final review = item.review;
     return Column(
       children: [
         Expanded(
@@ -275,13 +293,21 @@ class _Question extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.auto_awesome, color: kQuizPurple, size: 20),
+                    Icon(
+                      review == null ? Icons.auto_awesome : Icons.replay_rounded,
+                      color: review == null ? kQuizPurple : kQuizOrange,
+                      size: 20,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'PALAVRA FREQUENTE Nº ${thousands(item.position)}',
+                        review == null
+                            ? 'PALAVRA FREQUENTE Nº ${thousands(item.position)}'
+                            : review.pending
+                                ? 'REVISÃO · AINDA NÃO REVISADA'
+                                : 'REVISÃO',
                         style: theme.textTheme.labelLarge?.copyWith(
-                          color: kQuizPurple,
+                          color: review == null ? kQuizPurple : kQuizOrange,
                           fontWeight: FontWeight.w800,
                           letterSpacing: 0.6,
                         ),
@@ -307,7 +333,11 @@ class _Question extends StatelessWidget {
                 _Speech(item: item, onSpeak: () => onSpeak(item.phrase), marks: speaking ? check?.words : null),
                 const SizedBox(height: 10),
                 Text(
-                  '"${item.word}" aparece ${thousands(item.times)} vezes nas suas legendas',
+                  review == null
+                      ? '"${item.word}" aparece ${thousands(item.times)} vezes nas suas legendas'
+                      : '"${item.word}": você errou ${review.wrong} de ${review.wrong + review.right} '
+                          '${review.wrong + review.right == 1 ? 'vez' : 'vezes'}'
+                          '${review.lastTest == null ? '' : ' · último teste ${daysAgo(review.lastTest!)}'}',
                   style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                 ),
                 if (quiz.note.isNotEmpty) ...[

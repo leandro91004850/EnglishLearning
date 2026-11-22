@@ -10,13 +10,15 @@ import 'app_actions.dart';
 import 'archived_page.dart';
 import 'home_page.dart';
 import 'quiz_page.dart';
+import 'results_page.dart';
 import 'words_page.dart';
 
 const Color kVideosColor = Color(0xFFFF6A55);
 const Color kQuizColor = Color(0xFF93D333);
+const Color kResultsColor = Color(0xFFFF9600);
 const Color kWordsColor = Color(0xFF49C0F8);
 
-/// O menu inicial: Vídeos, Lições e Palavras mais usadas, com os números das suas legendas.
+/// O menu inicial: Vídeos, Lições, Seus resultados e Palavras mais usadas, com os números das suas legendas.
 class MenuPage extends StatefulWidget {
   const MenuPage({super.key, required this.services});
 
@@ -31,6 +33,7 @@ class _MenuPageState extends State<MenuPage> {
   WordStats? _stats;
   QuizItem? _next; // a próxima frase do quiz
   int _archived = 0; // frases arquivadas (fora das lições)
+  WordResults? _results; // acertos e erros nas lições
   bool _loading = true;
 
   AppServices get services => widget.services;
@@ -70,11 +73,18 @@ class _MenuPageState extends State<MenuPage> {
     } on ApiFailure {
       // o aviso do servidor já aparece no alto do menu
     }
+    WordResults? results;
+    try {
+      results = await services.api.results();
+    } on ApiFailure {
+      // sem os resultados, o cartão só convida a fazer uma lição
+    }
     if (!mounted) return;
     setState(() {
       _stats = stats ?? _stats;
       _next = next;
       _archived = archived ?? _archived;
+      _results = results ?? _results;
       _loading = false;
     });
   }
@@ -83,6 +93,8 @@ class _MenuPageState extends State<MenuPage> {
     await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
     if (mounted) unawaited(_load());
   }
+
+  static String _count(int n, String one, String many) => n == 1 ? '1 $one' : '${thousands(n)} $many';
 
   String get _greeting {
     final hour = DateTime.now().hour;
@@ -212,6 +224,59 @@ class _MenuPageState extends State<MenuPage> {
                           ],
                         ),
                   onTap: () => _go(QuizPage(services: services)),
+                ),
+                _MenuCard(
+                  color: kResultsColor,
+                  icon: Icons.emoji_events_rounded,
+                  title: 'Seus resultados',
+                  text: 'O ranking das palavras que você acertou e errou nas lições, com o dia do último teste.',
+                  footer: _results == null || _results!.words.isEmpty
+                      ? Text(
+                          'Faça uma lição para começar o ranking.',
+                          style: theme.textTheme.bodySmall?.copyWith(color: kResultsColor, fontWeight: FontWeight.w600),
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text.rich(
+                                TextSpan(
+                                  style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                                  children: [
+                                    TextSpan(
+                                      text: '✓ ${_count(_results!.right, 'acerto', 'acertos')}',
+                                      style: const TextStyle(color: kQuizColor),
+                                    ),
+                                    const TextSpan(text: '   '),
+                                    TextSpan(
+                                      text: '✗ ${_count(_results!.wrong, 'erro', 'erros')}',
+                                      style: const TextStyle(color: Color(0xFFFF5A5A)),
+                                    ),
+                                    if (_results!.lastTest != null)
+                                      TextSpan(
+                                        text: '   · ${dayAndTime(_results!.lastTest!)}',
+                                        style: const TextStyle(color: kResultsColor),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            if (_results!.toReview > 0)
+                              TextButton.icon(
+                                onPressed: () => _go(QuizPage(services: services, review: true)),
+                                style: TextButton.styleFrom(
+                                  foregroundColor: kResultsColor,
+                                  padding: EdgeInsets.zero,
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                icon: const Icon(Icons.replay_rounded, size: 18),
+                                label: Text(
+                                  _results!.toReview == 1
+                                      ? 'Revisar 1 palavra'
+                                      : 'Revisar ${thousands(_results!.toReview)} palavras',
+                                ),
+                              ),
+                          ],
+                        ),
+                  onTap: () => _go(ResultsPage(services: services)),
                 ),
                 _MenuCard(
                   color: kWordsColor,

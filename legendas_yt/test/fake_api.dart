@@ -31,6 +31,9 @@ class FakeApi {
   /// Os ids das frases arquivadas (POST/DELETE /frases/{id}/arquivar): ficam fora do GET /quiz.
   final Set<int> archived = {};
 
+  /// As respostas das lições (POST /resultados), na ordem: (palavra, acertou). GET /resultados soma.
+  final List<(String, bool)> answers = [];
+
   /// Respostas de GET /legendas/{job}, uma por pergunta (a última se repete).
   List<Map<String, Object?>> jobStates = [jobState(finished: true, ready: true, message: 'pronto')];
   int _poll = 0;
@@ -40,6 +43,33 @@ class FakeApi {
   ApiClient api({String token = ''}) => ApiClient(client, ApiSettings(url: apiUrl, token: token));
 
   List<String> get paths => [for (final r in requests) '${r.method} ${r.url.path}'];
+
+  /// A revisão: as palavras erradas ainda não revisadas (a última resposta foi um erro), as com mais
+  /// erros primeiro. (A API de verdade também traz, um dia depois, as já revisadas.)
+  List<Map<String, Object?>> _reviewQueue() {
+    final stats = <String, (int, int, bool, int)>{}; // palavra -> (acertos, erros, última certa, quando)
+    for (final (i, (word, ok)) in answers.indexed) {
+      final (right, wrong, _, _) = stats[word] ?? (0, 0, true, 0);
+      stats[word] = (right + (ok ? 1 : 0), wrong + (ok ? 0 : 1), ok, i);
+    }
+    final pending = [
+      for (final MapEntry(key: word, value: (right, wrong, lastOk, at)) in stats.entries)
+        if (!lastOk)
+          for (final item in quizItems)
+            if (item['palavra'] == word && !archived.contains(item['id']))
+              {
+                ...item,
+                'revisao': {
+                  'acertos': right,
+                  'erros': wrong,
+                  'pendente': true,
+                  'ultimo_teste': DateTime.utc(2026, 11, 22, 13, at).toIso8601String(),
+                },
+              },
+    ];
+    pending.sort((a, b) => ((b['revisao'] as Map)['erros'] as int).compareTo((a['revisao'] as Map)['erros'] as int));
+    return pending;
+  }
 
   Future<http.Response> handle(http.Request r) async {
     requests.add(r);
@@ -83,6 +113,42 @@ class FakeApi {
           'frases': 100,
           'palavras': 50,
           'arquivadas': archived.length,
+          'banco': dbMessage,
+        });
+      case ('POST', '/resultados'):
+        answers.add(('${body['palavra']}', body['acertou'] == true));
+        return json({'ok': true});
+      case ('GET', '/revisao'):
+        final queue = _reviewQueue();
+        final count = int.parse(r.url.queryParameters['quantidade'] ?? '10');
+        return json({
+          'itens': queue.take(count).toList(),
+          'total': queue.length,
+          'pendentes': queue.length,
+          'banco': dbMessage,
+        });
+      case ('GET', '/resultados'):
+        final byWord = <String, Map<String, Object?>>{};
+        for (final (i, (word, ok)) in answers.indexed) {
+          final index = quizItems.indexWhere((q) => q['palavra'] == word);
+          final r = byWord.putIfAbsent(
+            word,
+            () => {'palavra': word, 'acertos': 0, 'erros': 0, 'item': index < 0 ? null : index},
+          );
+          final key = ok ? 'acertos' : 'erros';
+          r[key] = (r[key] as int) + 1;
+          r['ultimo_teste'] = DateTime.utc(2026, 11, 22, 13, i).toIso8601String();
+          r['ultimo_resultado'] = ok;
+        }
+        final words = byWord.values.toList()
+          ..sort((a, b) => '${b['ultimo_teste']}'.compareTo('${a['ultimo_teste']}'));
+        return json({
+          'palavras': words,
+          'acertos': answers.where((a) => a.$2).length,
+          'erros': answers.where((a) => !a.$2).length,
+          'ultimo_teste': words.isEmpty ? '' : words.first['ultimo_teste'],
+          'revisar': _reviewQueue().length,
+          'pendentes': _reviewQueue().length,
           'banco': dbMessage,
         });
       case ('GET', '/frases/arquivadas'):
