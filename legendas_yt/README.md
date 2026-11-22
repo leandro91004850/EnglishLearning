@@ -9,8 +9,8 @@ O app abre num menu com três caminhos:
   sobre o vídeo e numa lista de falas que acompanha o vídeo (tocar numa fala leva o vídeo até ela).
 - **Lições**: exercícios sorteados, como no Duolingo, com as frases em inglês das suas legendas, das
   palavras que mais aparecem nas legendas para as que menos: **Traduza esta frase** (montar a tradução
-  com as fichas) e **Repita esta frase** (falar a frase; o reconhecimento de voz do aparelho confere a
-  pronúncia).
+  com as fichas), **Repita esta frase** (falar a frase; o reconhecimento de voz do aparelho confere a
+  pronúncia) e **Combine os pares** (ligar as palavras da lição com as traduções delas).
 - **Seus resultados**: o ranking das palavras que você acertou e errou nas lições, com o dia do último
   teste; tocar numa palavra pratica de novo. Daqui sai a **revisão** das palavras que você errou.
 - **Palavras mais usadas**: o ranking das palavras em inglês das suas legendas; tocar numa abre o quiz
@@ -99,6 +99,12 @@ precisariam de outro pacote de WebView.)
   Android), pelo plugin `speech_to_text`: gratuito e sem chave. Na primeira vez, o aparelho pede
   permissão para o microfone e para o reconhecimento de voz. Ele pode precisar de internet (o aparelho
   decide se reconhece nele mesmo ou no servidor da Apple ou do Google).
+- **Combine os pares**: cada lição tem um cartão (num lugar sorteado, nunca o primeiro) com as palavras
+  em inglês dela — até 5 — à direita e as traduções à esquerda, embaralhadas. Toque numa de cada lado:
+  o par certo apaga; o errado pisca em vermelho, e as duas palavras contam um erro nos seus resultados
+  (as outras, um acerto). Tocar numa palavra em inglês lê a palavra. A tradução de cada palavra
+  sozinha vem da API, que traduz uma vez só e guarda no banco; sem 3 pares com traduções diferentes,
+  a lição segue sem o cartão.
 - **NÃO POSSO FALAR AGORA**: a frase vira "Traduza", e as lições ficam sem falar por 15 minutos. Sem
   permissão do microfone, as lições seguem só com "Traduza".
 - Lições de 10 frases; a frase errada volta uma vez no fim da lição, no mesmo exercício. **Ver no

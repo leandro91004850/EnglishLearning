@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' show Random;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
@@ -39,6 +40,9 @@ class QuizPage extends StatefulWidget {
     this.voice,
     this.speakShare = QuizSession.defaultSpeakShare,
     this.review = false,
+    this.matching = true,
+    this.matchAt,
+    this.random,
   });
 
   final AppServices services;
@@ -57,6 +61,13 @@ class QuizPage extends StatefulWidget {
   /// tempo sem revisar (onde o quiz parou não muda).
   final bool review;
 
+  /// Cada lição ganha um "Combine os pares" com as palavras dela.
+  final bool matching;
+
+  /// Os testes fixam onde o "Combine os pares" entra e o sorteio.
+  final int? matchAt;
+  final Random? random;
+
   @override
   State<QuizPage> createState() => _QuizPageState();
 }
@@ -68,6 +79,9 @@ class _QuizPageState extends State<QuizPage> {
     voice: widget.voice ?? DeviceVoiceInput.instance,
     speakShare: widget.speakShare,
     review: widget.review,
+    matching: widget.matching,
+    matchAt: widget.matchAt,
+    random: widget.random,
   );
   late final Speaker speaker = widget.speaker ?? DeviceSpeaker();
   int? _spoken; // a frase (QuizSession.turn) já lida em voz alta
@@ -199,7 +213,9 @@ class _QuizPageState extends State<QuizPage> {
                 onSecondary: () => Navigator.of(context).maybePop(),
               );
             } else {
-              body = _Question(quiz: quiz, onSpeak: _say, onMic: _mic, onOpenVideo: _openVideo, onArchive: _archive);
+              body = quiz.exercise == Exercise.match
+                  ? _MatchQuestion(quiz: quiz, onSpeak: _say)
+                  : _Question(quiz: quiz, onSpeak: _say, onMic: _mic, onOpenVideo: _openVideo, onArchive: _archive);
             }
             return Column(
               children: [
@@ -388,6 +404,168 @@ class _Question extends StatelessWidget {
             onPressed: quiz.canCheck ? quiz.check : null,
           ),
       ],
+    );
+  }
+}
+
+/// "Combine os pares": as traduções à esquerda e as palavras em inglês à direita, embaralhadas.
+/// Toque numa de cada lado: o par certo fica apagado; o errado pisca em vermelho.
+class _MatchQuestion extends StatelessWidget {
+  const _MatchQuestion({required this.quiz, required this.onSpeak});
+
+  final QuizSession quiz;
+  final Future<void> Function(String) onSpeak;
+
+  /// "i" e "i'm" com maiúscula, como se escreve.
+  static String _english(String word) => word == 'i' || word.startsWith("i'") ? 'I${word.substring(1)}' : word;
+
+  _PairState _state(int pair, {required bool left}) {
+    if (quiz.matched.contains(pair)) return _PairState.matched;
+    final wrong = quiz.wrongPair;
+    if (wrong != null && (left ? wrong.$1 : wrong.$2) == pair) return _PairState.wrong;
+    return (left ? quiz.pickedLeft : quiz.pickedRight) == pair ? _PairState.picked : _PairState.idle;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final pairs = quiz.pairs;
+    final done = quiz.correct != null;
+    final missed = [for (final i in quiz.missed) _english(pairs[i].word)];
+    return Column(
+      children: [
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.join_inner_rounded, color: kQuizBlue, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      'PALAVRAS DESTA LIÇÃO',
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        color: kQuizBlue,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text('Combine os pares:', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+                const SizedBox(height: 28),
+                for (var row = 0; row < pairs.length; row++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 14),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _PairTile(
+                            text: pairs[quiz.leftOrder[row]].translation,
+                            state: _state(quiz.leftOrder[row], left: true),
+                            onTap: done ? null : () => quiz.pickLeft(quiz.leftOrder[row]),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: _PairTile(
+                            text: _english(pairs[quiz.rightOrder[row]].word),
+                            state: _state(quiz.rightOrder[row], left: false),
+                            onTap: done
+                                ? null
+                                : () {
+                                    final pair = quiz.rightOrder[row];
+                                    unawaited(onSpeak(pairs[pair].word));
+                                    quiz.pickRight(pair);
+                                  },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (done)
+          _Feedback(
+            correct: true,
+            title: missed.isEmpty ? 'Muito bem!' : 'Pares combinados!',
+            text: 'Você combinou os ${pairs.length} pares.',
+            details: [
+              if (missed.isNotEmpty)
+                '${missed.length == 1 ? 'Errou o par de' : 'Errou os pares de'} ${missed.join(', ')}: '
+                    '${missed.length == 1 ? 'ela conta' : 'elas contam'} como erro nos seus resultados.',
+            ],
+            onContinue: quiz.next,
+            onOpenVideo: () {},
+          ),
+      ],
+    );
+  }
+}
+
+enum _PairState { idle, picked, matched, wrong }
+
+class _PairTile extends StatelessWidget {
+  const _PairTile({required this.text, required this.state, required this.onTap});
+
+  final String text;
+  final _PairState state;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = switch (state) {
+      _PairState.picked => kQuizBlue,
+      _PairState.wrong => kQuizRed,
+      _PairState.matched => kTileBorder.withValues(alpha: 0.6),
+      _PairState.idle => kTileBorder,
+    };
+    final side = BorderSide(color: color, width: 2);
+    return GestureDetector(
+      onTap: state == _PairState.matched ? null : onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        height: 62,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: BoxDecoration(
+          color: switch (state) {
+            _PairState.picked => kQuizBlue.withValues(alpha: 0.14),
+            _PairState.wrong => kQuizRed.withValues(alpha: 0.14),
+            _PairState.matched => Colors.transparent,
+            _PairState.idle => kPanelHigh,
+          },
+          borderRadius: BorderRadius.circular(14),
+          border: Border(
+            top: side,
+            left: side,
+            right: side,
+            bottom: BorderSide(color: color, width: state == _PairState.matched ? 2 : 4),
+          ),
+        ),
+        child: Center(
+          child: Text(
+            text,
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontSize: 18,
+              color: switch (state) {
+                _PairState.picked => kQuizBlue,
+                _PairState.wrong => kQuizRed,
+                _PairState.matched => theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.45),
+                _PairState.idle => null,
+              },
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -822,7 +1000,7 @@ class _BottomButton extends StatelessWidget {
 class _Feedback extends StatelessWidget {
   const _Feedback({
     required this.correct,
-    required this.item,
+    this.item,
     required this.title,
     required this.text,
     this.details = const [],
@@ -831,7 +1009,7 @@ class _Feedback extends StatelessWidget {
   });
 
   final bool correct;
-  final QuizItem item;
+  final QuizItem? item;
   final String title;
   final String text;
   final List<String> details;
@@ -872,7 +1050,7 @@ class _Feedback extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(line, style: theme.textTheme.bodySmall?.copyWith(color: color.withValues(alpha: 0.85))),
                 ],
-                if (item.videoId.isNotEmpty)
+                if (item != null && item!.videoId.isNotEmpty)
                   Align(
                     alignment: Alignment.centerLeft,
                     child: TextButton.icon(
@@ -880,7 +1058,7 @@ class _Feedback extends StatelessWidget {
                       onPressed: onOpenVideo,
                       icon: const Icon(Icons.play_circle_outline, size: 20),
                       label: Text(
-                        'Ver no vídeo${item.videoTitle.isEmpty ? '' : ': ${item.videoTitle}'}',
+                        'Ver no vídeo${item!.videoTitle.isEmpty ? '' : ': ${item!.videoTitle}'}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),

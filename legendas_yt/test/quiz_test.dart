@@ -318,6 +318,81 @@ void main() {
     });
   });
 
+  group('Combine os pares', () {
+    late FakeApi fake;
+    late Prefs prefs;
+
+    setUp(() {
+      fake = FakeApi()
+        ..quizItems = List.of(sampleQuiz)
+        ..wordTranslations.addAll({'you': 'você', 'dad': 'pai', 'my': 'meu'});
+      prefs = Prefs(fake.api());
+    });
+
+    test('a lição ganha um cartão com as palavras dela; o par errado conta erro nas duas', () async {
+      final quiz = QuizSession(api: fake.api(), prefs: prefs, random: Random(1));
+      await quiz.start();
+      var skipped = 0;
+      while (quiz.exercise != Exercise.match) {
+        for (final w in quiz.current!.answer) {
+          quiz.pick(quiz.current!.tiles.indexOf(w));
+        }
+        quiz.check();
+        quiz.next();
+        skipped++;
+      }
+      expect(skipped, inInclusiveRange(1, 3), reason: 'nunca no começo da lição');
+      expect(quiz.current, isNull);
+      expect({for (final p in quiz.pairs) p.word}, {'you', 'dad', 'my'});
+      int pair(String word) => quiz.pairs.indexWhere((p) => p.word == word);
+
+      quiz
+        ..pickLeft(pair('you'))
+        ..pickRight(pair('dad')); // errado
+      expect(quiz.wrongPair, (pair('you'), pair('dad')));
+      expect(quiz.matched, isEmpty);
+      expect(quiz.missed, {pair('you'), pair('dad')});
+      quiz
+        ..pickRight(pair('you'))
+        ..pickLeft(pair('you')) // a ordem não importa
+        ..pickLeft(pair('dad'))
+        ..pickRight(pair('dad'));
+      expect(quiz.correct, isNull);
+      quiz
+        ..pickLeft(pair('my'))
+        ..pickRight(pair('my'));
+      expect(quiz.correct, isTrue);
+      expect(quiz.right, skipped, reason: 'com erro, o cartão não soma acerto');
+      await pumpEventQueue();
+      expect(fake.answers.skip(fake.answers.length - 3).toSet(), {('you', false), ('dad', false), ('my', true)});
+      quiz.dispose();
+    });
+
+    test('sem 3 traduções diferentes, ou desligado, a lição segue sem o cartão', () async {
+      fake.wordTranslations
+        ..clear()
+        ..addAll({'you': 'você', 'dad': 'você', 'my': 'my'}); // repetida e igual ao inglês
+      final quiz = QuizSession(api: fake.api(), prefs: prefs, random: Random(1));
+      await quiz.start();
+      expect(fake.paths, contains('GET /pares'));
+      final off = QuizSession(api: fake.api(), prefs: prefs, matching: false);
+      fake.requests.clear();
+      await off.start();
+      expect(fake.paths, isNot(contains('GET /pares')));
+      for (final q in [quiz, off]) {
+        var cards = 0;
+        while (q.current != null) {
+          expect(q.exercise, isNot(Exercise.match));
+          q.pick(0);
+          q.check();
+          q.next();
+          if (++cards > 10) break;
+        }
+        q.dispose();
+      }
+    });
+  });
+
   Future<AppServices> quizServices(WidgetTester tester, {FakeApi? api}) async {
     final dir = Directory.systemTemp.createTempSync('legendas_quiz');
     addTearDown(() => dir.deleteSync(recursive: true));
@@ -484,6 +559,40 @@ void main() {
     await settle(tester);
     expect(find.text('REVISÃO · AINDA NÃO REVISADA'), findsOneWidget);
     expect(find.textContaining('"dad": você errou 2 de 2 vezes'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('combine os pares: uma de cada lado; o certo apaga, o errado pisca, e a palavra é lida', (tester) async {
+    final fake = FakeApi()
+      ..quizItems = List.of(sampleQuiz)
+      ..wordTranslations.addAll({'you': 'você', 'dad': 'pai', 'my': 'meu'});
+    final services = await quizServices(tester, api: fake);
+    final speaker = SilentSpeaker();
+    await tester.pumpWidget(MaterialApp(
+      theme: buildTheme(),
+      home: QuizPage(services: services, speaker: speaker, voice: FakeVoice(), speakShare: 0, matchAt: 0),
+    ));
+    await settle(tester);
+    expect(find.text('Combine os pares:'), findsOneWidget);
+
+    await tester.tap(find.text('você'));
+    await tester.pump();
+    await tester.tap(find.text('dad'));
+    await tester.pump();
+    expect(speaker.said, ['dad'], reason: 'tocar na palavra em inglês lê a palavra');
+    await tester.pump(const Duration(milliseconds: 800)); // o vermelho passa
+    for (final (pt, en) in [('você', 'you'), ('pai', 'dad'), ('meu', 'my')]) {
+      await tester.tap(find.text(pt));
+      await tester.pump();
+      await tester.tap(find.text(en));
+      await tester.pump();
+    }
+    expect(find.text('Pares combinados!'), findsOneWidget);
+    expect(find.textContaining('Errou os pares de'), findsOneWidget);
+
+    await tester.tap(find.text('CONTINUAR'));
+    await settle(tester);
+    expect(find.text('PALAVRA FREQUENTE Nº 1'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 }

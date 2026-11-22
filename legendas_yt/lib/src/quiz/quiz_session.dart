@@ -1,7 +1,8 @@
 /// As lições: exercícios com as frases das legendas do banco, como no Duolingo, pela ordem das
 /// palavras que mais se repetem nas legendas (a API analisa as falas e manda as frases já nessa
 /// ordem). Cada frase vira, por sorteio, um dos exercícios ([Exercise]): traduzir montando a
-/// tradução com fichas ou repetir a frase em voz alta.
+/// tradução com fichas ou repetir a frase em voz alta. E cada lição tem um "Combine os pares" com as
+/// palavras dela.
 ///
 /// As frases vêm em lições de [QuizSession.lessonSize]; a frase errada volta uma vez no fim da
 /// lição. Onde o quiz parou fica nas preferências (na API), e a próxima lição começa dali.
@@ -25,13 +26,32 @@ enum Exercise {
 
   /// "Repita esta frase": falar a frase em inglês; o reconhecimento de voz confere a pronúncia.
   speak,
+
+  /// "Combine os pares": ligar as palavras em inglês da lição com as traduções delas.
+  match,
 }
 
+/// Um cartão da lição: uma frase (com o exercício sorteado) ou um "Combine os pares".
 class _Card {
-  _Card(this.item, this.exercise);
+  _Card(this.item, this.exercise)
+      : pairs = const [],
+        left = const [],
+        right = const [];
 
-  final QuizItem item;
+  _Card.match(this.pairs, Random random)
+      : item = null,
+        exercise = Exercise.match,
+        left = [for (var i = 0; i < pairs.length; i++) i]..shuffle(random),
+        right = [for (var i = 0; i < pairs.length; i++) i]..shuffle(random);
+
+  final QuizItem? item;
   Exercise exercise;
+
+  /// Combine os pares: as palavras, e a ordem delas na tela (índices em [pairs]): as traduções à
+  /// esquerda, as palavras em inglês à direita.
+  final List<WordPair> pairs;
+  final List<int> left;
+  final List<int> right;
 }
 
 class QuizSession extends ChangeNotifier {
@@ -42,6 +62,8 @@ class QuizSession extends ChangeNotifier {
     this.voice,
     this.speakShare = defaultSpeakShare,
     this.review = false,
+    this.matching = true,
+    this.matchAt,
     Random? random,
   }) : _random = random ?? Random.secure(); // Random() repetia o mesmo sorteio a cada vez que o app abria
 
@@ -53,6 +75,9 @@ class QuizSession extends ChangeNotifier {
 
   /// "Não posso falar agora": quanto tempo sem exercícios de falar.
   static const Duration quietFor = Duration(minutes: 15);
+
+  /// Quantos pares no "Combine os pares" (no máximo).
+  static const int maxPairs = 5;
 
   final ApiClient api;
   final Prefs prefs;
@@ -66,6 +91,12 @@ class QuizSession extends ChangeNotifier {
   /// A revisão: as frases vêm de GET /revisao (as palavras erradas ainda não revisadas primeiro,
   /// depois as com mais erros e há mais tempo sem revisar), e onde o quiz parou não muda.
   final bool review;
+
+  /// Cada lição ganha um "Combine os pares" com as palavras dela.
+  final bool matching;
+
+  /// Onde o "Combine os pares" entra na lição (os testes fixam; sem ele, sorteado, não no começo).
+  final int? matchAt;
 
   /// Revisão: nada para revisar agora.
   bool nothingToReview = false;
@@ -137,6 +168,24 @@ class QuizSession extends ChangeNotifier {
   /// Tentativas de falar esta frase.
   int tries = 0;
 
+  // Combine os pares
+
+  /// A tradução e a palavra em inglês escolhidas (índices em [pairs]), esperando o par.
+  int? pickedLeft;
+  int? pickedRight;
+
+  /// Os pares já combinados, e os que tiveram erro (contam como erro no ranking).
+  final Set<int> matched = {};
+  final Set<int> missed = {};
+
+  /// O último par errado (tradução, palavra), que pisca em vermelho.
+  (int, int)? wrongPair;
+  Timer? _wrongTimer;
+
+  List<WordPair> get pairs => _card?.pairs ?? const [];
+  List<int> get leftOrder => _card?.left ?? const [];
+  List<int> get rightOrder => _card?.right ?? const [];
+
   _Card? get _card => _index < _lesson.length ? _lesson[_index] : null;
 
   QuizItem? get current => _card?.item;
@@ -179,6 +228,7 @@ class QuizSession extends ChangeNotifier {
       reviewTotal = review ? batch.total : 0;
       reviewPending = review ? batch.pending : 0;
       _lesson = [for (final item in batch.items) _Card(item, _draw())];
+      if (matching && _lesson.length >= 3) await _addMatch();
       if (_lesson.isEmpty) {
         if (review && batch.dbMessage.isEmpty) {
           nothingToReview = true;
@@ -203,8 +253,38 @@ class QuizSession extends ChangeNotifier {
     answered = 0;
     note = '';
     _resetSpeaking();
+    _resetMatch();
     loading = false;
     notifyListeners();
+  }
+
+  /// O "Combine os pares" da lição: as palavras dela (até [maxPairs]) com a tradução de cada uma, num
+  /// lugar sorteado da lição (não no começo). Sem pelo menos 3 pares com traduções diferentes, a
+  /// lição segue sem ele.
+  Future<void> _addMatch() async {
+    final words = <String>[];
+    for (final card in _lesson) {
+      final word = card.item?.word ?? '';
+      if (word.isNotEmpty && !words.contains(word)) words.add(word);
+    }
+    final List<WordPair> found;
+    try {
+      found = await api.pairs(words);
+    } on Object catch (e) {
+      Log.warning('Combine os pares: $e'); // a lição segue sem ele
+      return;
+    }
+    final pairs = <WordPair>[];
+    final translations = <String>{};
+    for (final pair in found) {
+      final t = pair.translation.trim().toLowerCase();
+      if (t.isEmpty || t == pair.word.toLowerCase() || !translations.add(t)) continue; // ambíguo
+      pairs.add(pair);
+    }
+    if (pairs.length < 3) return;
+    pairs.shuffle(_random);
+    final at = matchAt?.clamp(0, _lesson.length) ?? 1 + _random.nextInt(_lesson.length);
+    _lesson.insert(at, _Card.match(pairs.take(maxPairs).toList(), _random));
   }
 
   /// O sorteio do exercício de cada frase.
@@ -264,7 +344,7 @@ class QuizSession extends ChangeNotifier {
         }
         listening = false;
         level.value = 0;
-        _judge(card.item, heard.transcripts);
+        _judge(card.item!, heard.transcripts);
       },
       onError: (message) {
         if (_closed || _card != card || !listening) return;
@@ -327,7 +407,7 @@ class QuizSession extends ChangeNotifier {
   void _speakingOff(String message) {
     _stopListening();
     for (final card in _lesson.skip(_index)) {
-      card.exercise = Exercise.translate;
+      if (card.exercise == Exercise.speak) card.exercise = Exercise.translate;
     }
     _resetSpeaking();
     note = message;
@@ -344,18 +424,80 @@ class QuizSession extends ChangeNotifier {
   /// O resultado vai para a API, na palavra da frase (o ranking de acertos e erros).
   void _answer(bool ok) {
     final card = _card!;
+    final item = card.item!;
     correct = ok;
     answered++;
-    final saving = _record(card.item.word, ok);
-    _recording.add(saving);
-    unawaited(saving.whenComplete(() => _recording.remove(saving)));
+    _track(_record(item.word, ok));
     if (ok) {
       right++;
-      if (_saveProgress && card.item.position > prefs.quizPos) prefs.quizPos = card.item.position;
-    } else if (_retried.add(card.item.position)) {
-      _lesson.add(_Card(card.item, card.exercise));
+      if (_saveProgress && item.position > prefs.quizPos) prefs.quizPos = item.position;
+    } else if (_retried.add(item.position)) {
+      _lesson.add(_Card(item, card.exercise));
     }
     notifyListeners();
+  }
+
+  void _track(Future<void> saving) {
+    _recording.add(saving);
+    unawaited(saving.whenComplete(() => _recording.remove(saving)));
+  }
+
+  /// Combine os pares: escolhe uma tradução (à esquerda) ou uma palavra em inglês (à direita), pelo
+  /// índice do par. Com as duas escolhidas: do mesmo par, combinou; senão, as duas palavras contam
+  /// um erro, e a escolha recomeça.
+  void pickLeft(int pair) => _pickPair(pair, left: true);
+  void pickRight(int pair) => _pickPair(pair, left: false);
+
+  void _pickPair(int pair, {required bool left}) {
+    if (exercise != Exercise.match || correct != null || pair < 0 || pair >= pairs.length) return;
+    if (matched.contains(pair)) return;
+    _clearWrong();
+    if (left) {
+      pickedLeft = pickedLeft == pair ? null : pair;
+    } else {
+      pickedRight = pickedRight == pair ? null : pair;
+    }
+    final l = pickedLeft, r = pickedRight;
+    if (l != null && r != null) {
+      pickedLeft = pickedRight = null;
+      if (l == r) {
+        matched.add(l);
+        if (matched.length == pairs.length) _finishMatch();
+      } else {
+        wrongPair = (l, r);
+        missed
+          ..add(l)
+          ..add(r);
+        _wrongTimer = Timer(const Duration(milliseconds: 700), () {
+          if (_closed) return;
+          wrongPair = null;
+          notifyListeners();
+        });
+      }
+    }
+    notifyListeners();
+  }
+
+  void _clearWrong() {
+    _wrongTimer?.cancel();
+    wrongPair = null;
+  }
+
+  /// Todos os pares combinados: cada palavra vai para o ranking (com erro, se errou o par dela).
+  void _finishMatch() {
+    correct = true;
+    answered++;
+    if (missed.isEmpty) right++;
+    for (final (i, pair) in pairs.indexed) {
+      _track(_record(pair.word, !missed.contains(i)));
+    }
+  }
+
+  void _resetMatch() {
+    _clearWrong();
+    pickedLeft = pickedRight = null;
+    matched.clear();
+    missed.clear();
   }
 
   /// Arquiva a frase atual na API: ela não aparece mais nas lições (nem volta no fim desta). Sem
@@ -363,13 +505,14 @@ class QuizSession extends ChangeNotifier {
   /// (o motivo fica em [note]).
   Future<bool> archiveCurrent() async {
     final card = _card;
-    if (card == null || archiving) return false;
+    final item = card?.item;
+    if (card == null || item == null || archiving) return false;
     _stopListening();
     archiving = true;
     note = '';
     notifyListeners();
     try {
-      await api.archive(card.item.id);
+      await api.archive(item.id);
     } on ApiFailure catch (e) {
       if (_closed) return false;
       archiving = false;
@@ -383,7 +526,7 @@ class QuizSession extends ChangeNotifier {
     _lesson = [
       ..._lesson.take(keep),
       for (final c in _lesson.skip(keep))
-        if (c.item.id != card.item.id) c,
+        if (c.item?.id != item.id) c,
     ];
     if (correct == null) {
       picked.clear();
@@ -419,12 +562,14 @@ class QuizSession extends ChangeNotifier {
     note = '';
     _stopListening();
     _resetSpeaking();
+    _resetMatch();
     notifyListeners();
   }
 
   @override
   void dispose() {
     _closed = true;
+    _wrongTimer?.cancel();
     _stopListening();
     level.dispose();
     super.dispose();

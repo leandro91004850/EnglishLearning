@@ -284,6 +284,14 @@ class WordStats {
   final String dbMessage;
 }
 
+/// Uma palavra em inglês e a tradução dela (o exercício "Combine os pares").
+class WordPair {
+  const WordPair(this.word, this.translation);
+
+  final String word;
+  final String translation;
+}
+
 /// O histórico de uma palavra da revisão.
 class ReviewInfo {
   const ReviewInfo({required this.right, required this.wrong, required this.lastTest, required this.pending});
@@ -473,6 +481,15 @@ class ApiClient {
     final message = '${r['banco'] ?? ''}';
     if (message.isNotEmpty) throw ApiFailure(message);
     return WordResults.fromJson(r);
+  }
+
+  /// As palavras em inglês com a tradução de cada uma (a API traduz uma vez e guarda no banco).
+  Future<List<WordPair>> pairs(List<String> words) async {
+    final r = await _call('GET', '/pares', query: {'palavras': words.join(',')}, timeout: diagnoseTimeout);
+    return [
+      for (final p in r['pares'] as List? ?? const [])
+        if (p is Map) WordPair('${p['palavra'] ?? ''}', '${p['traducao'] ?? ''}'),
+    ];
   }
 
   /// A revisão: primeiro as palavras erradas ainda não revisadas, depois as com mais erros e há mais

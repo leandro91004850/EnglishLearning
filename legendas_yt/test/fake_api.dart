@@ -31,6 +31,9 @@ class FakeApi {
   /// Os ids das frases arquivadas (POST/DELETE /frases/{id}/arquivar): ficam fora do GET /quiz.
   final Set<int> archived = {};
 
+  /// As traduções das palavras (GET /pares): só as que estão aqui voltam.
+  final Map<String, String> wordTranslations = {};
+
   /// As respostas das lições (POST /resultados), na ordem: (palavra, acertou). GET /resultados soma.
   final List<(String, bool)> answers = [];
 
@@ -118,6 +121,15 @@ class FakeApi {
       case ('POST', '/resultados'):
         answers.add(('${body['palavra']}', body['acertou'] == true));
         return json({'ok': true});
+      case ('GET', '/pares'):
+        final words = (r.url.queryParameters['palavras'] ?? '').split(',');
+        return json({
+          'pares': [
+            for (final w in words)
+              if (wordTranslations.containsKey(w)) {'palavra': w, 'traducao': wordTranslations[w]},
+          ],
+          'banco': dbMessage,
+        });
       case ('GET', '/revisao'):
         final queue = _reviewQueue();
         final count = int.parse(r.url.queryParameters['quantidade'] ?? '10');
