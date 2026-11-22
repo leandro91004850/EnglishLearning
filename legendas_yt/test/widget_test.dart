@@ -18,7 +18,7 @@ void main() {
     await tester.pumpWidget(LegendasApp(services: services));
     await tester.pump();
     expect(find.text('Vídeos'), findsOneWidget);
-    expect(find.text('Formar frases'), findsOneWidget);
+    expect(find.text('Lições'), findsOneWidget);
     expect(find.text('Palavras mais usadas'), findsOneWidget);
     expect(find.textContaining('Servidor não configurado'), findsOneWidget);
 

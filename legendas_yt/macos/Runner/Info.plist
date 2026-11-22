@@ -33,6 +33,10 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>O Legendas YT conecta ao servidor dele (a API) na rede local, de onde vêm a lista de vídeos, as legendas e as traduções.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>O Legendas YT ouve você repetir as frases em inglês nas lições, para conferir a pronúncia.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>O reconhecimento de voz do aparelho transforma a sua fala em texto para comparar com a frase da lição.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

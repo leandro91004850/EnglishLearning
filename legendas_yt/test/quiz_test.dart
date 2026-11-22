@@ -1,15 +1,18 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:legendas_yt/src/app/services.dart';
 import 'package:legendas_yt/src/data/prefs.dart';
 import 'package:legendas_yt/src/quiz/quiz_session.dart';
 import 'package:legendas_yt/src/quiz/speaker.dart';
+import 'package:legendas_yt/src/ui/archived_page.dart';
 import 'package:legendas_yt/src/ui/quiz_page.dart';
 import 'package:legendas_yt/src/ui/theme.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'fake_api.dart';
+import 'fake_voice.dart';
 
 void main() {
   group('QuizSession', () {
@@ -96,22 +99,234 @@ void main() {
     });
   });
 
-  testWidgets('tela do quiz: lê a frase, monta com as fichas, confere e continua', (tester) async {
+  group('Repita esta frase', () {
+    late FakeApi fake;
+    late Prefs prefs;
+    late FakeVoice voice;
+    late QuizSession quiz;
+
+    setUp(() {
+      fake = FakeApi()..quizItems = List.of(sampleQuiz);
+      prefs = Prefs(fake.api());
+      voice = FakeVoice();
+      quiz = QuizSession(api: fake.api(), prefs: prefs, lessonSize: 2, voice: voice, speakShare: 1);
+    });
+
+    Future<void> say(List<String> transcripts) async {
+      voice.script.add(transcripts);
+      await quiz.listen();
+      await pumpEventQueue();
+    }
+
+    test('falou certo: passa e guarda onde o quiz parou; vale a transcrição mais parecida', () async {
+      await quiz.start();
+      expect(quiz.exercise, Exercise.speak);
+      expect(quiz.canCheck, isFalse, reason: 'falar não tem VERIFICAR');
+      await say(['I loved you', 'I love you']);
+      expect(quiz.correct, isTrue);
+      expect((quiz.speech!.percent, quiz.hearing, quiz.listening), (100, 'I love you', false));
+      expect(prefs.quizPos, 1);
+    });
+
+    test('três tentativas: "quase" nas duas primeiras; errou, a frase volta no fim', () async {
+      await quiz.start();
+      await say(['I like food']);
+      expect((quiz.correct, quiz.tries), (null, 1));
+      expect(quiz.note, startsWith('Quase!'));
+      expect([for (final w in quiz.speech!.words) w.heard], [true, false, false]);
+      await say(['I glove shoe']);
+      expect(quiz.note, contains('tentativa 3 de 3'));
+      await say(['hi']);
+      expect(quiz.correct, isFalse);
+      expect(prefs.quizPos, 0);
+      quiz.next();
+      await say(['my dad']);
+      expect(quiz.correct, isTrue);
+      quiz.next();
+      expect((quiz.current!.word, quiz.exercise, quiz.tries), ('you', Exercise.speak, 0), reason: 'voltou no fim');
+    });
+
+    test('nada ouvido não conta tentativa; erro do microfone vira aviso', () async {
+      await quiz.start();
+      await say([]);
+      expect(quiz.tries, 0);
+      expect(quiz.note, startsWith('Não ouvi nada'));
+      voice.script.add('O microfone está ocupado. Tente de novo.');
+      await quiz.listen();
+      await pumpEventQueue();
+      expect((quiz.note, quiz.listening, quiz.exercise), ('O microfone está ocupado. Tente de novo.', false, Exercise.speak));
+    });
+
+    test('parar de ouvir; ouvir a frase de novo desliga o microfone', () async {
+      await quiz.start();
+      await quiz.listen();
+      expect(quiz.listening, isTrue);
+      await quiz.stopListening();
+      expect(quiz.listening, isFalse);
+      expect(quiz.note, startsWith('Não ouvi nada'));
+      await quiz.listen();
+      quiz.cancelListening();
+      expect((quiz.listening, voice.cancels), (false, 1));
+    });
+
+    test('"não posso falar agora": vira traduzir, e as lições seguintes também, por um tempo', () async {
+      await quiz.start();
+      quiz.cantSpeakNow();
+      expect((quiz.exercise, voice.available), (Exercise.translate, false));
+      for (final w in ['Eu', 'te', 'amo']) {
+        quiz.pick(quiz.current!.tiles.indexOf(w));
+      }
+      quiz.check();
+      quiz.next();
+      expect(quiz.exercise, Exercise.translate, reason: 'o resto da lição também');
+      await quiz.start();
+      expect(quiz.exercise, Exercise.translate, reason: 'pausado por ${QuizSession.quietFor.inMinutes} minutos');
+      voice.pausedUntil = DateTime.now().subtract(const Duration(seconds: 1));
+      await quiz.start();
+      expect(quiz.exercise, Exercise.speak, reason: 'passou o tempo');
+    });
+
+    test('sem permissão do microfone: as lições seguem sem falar', () async {
+      voice.allowed = false;
+      await quiz.start();
+      await quiz.listen();
+      expect(quiz.exercise, Exercise.translate);
+      expect(quiz.note, startsWith('Sem acesso ao microfone'));
+      expect(voice.blocked, isTrue);
+      await quiz.start();
+      expect(quiz.exercise, Exercise.translate);
+    });
+
+    test('o sorteio mistura os exercícios; sem microfone, só traduzir', () async {
+      final kinds = <Exercise>{};
+      final mixed = QuizSession(api: fake.api(), prefs: prefs, voice: voice, speakShare: 0.5, random: Random(3));
+      for (var i = 0; i < 12; i++) {
+        await mixed.start();
+        kinds.add(mixed.exercise);
+      }
+      expect(kinds, {Exercise.translate, Exercise.speak});
+      final silent = QuizSession(api: fake.api(), prefs: prefs, speakShare: 1);
+      await silent.start();
+      expect(silent.exercise, Exercise.translate);
+    });
+  });
+
+  group('Arquivar frases', () {
+    late FakeApi fake;
+    late Prefs prefs;
+    late QuizSession quiz;
+
+    setUp(() {
+      fake = FakeApi()..quizItems = List.of(sampleQuiz);
+      prefs = Prefs(fake.api());
+      quiz = QuizSession(api: fake.api(), prefs: prefs, lessonSize: 2);
+    });
+
+    void answer(List<String> words) {
+      for (final w in words) {
+        quiz.pick(quiz.current!.tiles.indexOf(w));
+      }
+      quiz.check();
+    }
+
+    test('a frase arquivada sai da lição, sem contar resposta, e não volta mais', () async {
+      await quiz.start();
+      final turn = quiz.turn;
+      expect(await quiz.archiveCurrent(), isTrue);
+      expect(fake.archived, {100});
+      expect((quiz.current!.word, quiz.answered, quiz.step), ('dad', 0, 0));
+      expect(quiz.turn, isNot(turn), reason: 'frase nova na tela: ela é lida');
+      answer(['meu', 'pai']);
+      expect(prefs.quizPos, 2);
+      quiz.next();
+      expect(quiz.finished, isTrue);
+      prefs.quizPos = 0;
+      await quiz.start();
+      expect(quiz.current!.word, 'dad', reason: 'do começo, a arquivada não aparece');
+    });
+
+    test('arquivar depois de errar: a resposta fica na tela e a frase não volta no fim', () async {
+      await quiz.start();
+      answer(['pai']);
+      expect(await quiz.archiveCurrent(), isTrue);
+      expect(quiz.correct, isFalse);
+      quiz.next();
+      answer(['meu', 'pai']);
+      quiz.next();
+      expect(quiz.finished, isTrue, reason: '"you" não voltou no fim');
+    });
+
+    test('arquivar a lição inteira traz a próxima', () async {
+      await quiz.start();
+      await quiz.archiveCurrent();
+      await quiz.archiveCurrent();
+      expect(quiz.current!.word, 'my');
+      expect(fake.archived, {100, 200});
+    });
+
+    test('sem a API, a frase fica e o aviso explica', () async {
+      await quiz.start();
+      fake.down = true;
+      expect(await quiz.archiveCurrent(), isFalse);
+      expect(quiz.current!.word, 'you');
+      expect(quiz.note, startsWith('Não deu para arquivar: Sem conexão com a API'));
+    });
+  });
+
+  Future<AppServices> quizServices(WidgetTester tester, {FakeApi? api}) async {
     final dir = Directory.systemTemp.createTempSync('legendas_quiz');
     addTearDown(() => dir.deleteSync(recursive: true));
     File('${dir.path}/servidor.json').writeAsStringSync('{"url": "$apiUrl", "chave": ""}');
-    final fake = FakeApi()..quizItems = List.of(sampleQuiz);
+    final fake = api ?? (FakeApi()..quizItems = List.of(sampleQuiz));
     final services = (await tester.runAsync(() => AppServices.create(dir: dir, client: fake.client)))!;
-    final speaker = SilentSpeaker();
     tester.view
       ..physicalSize = const Size(1206, 2622) // um iPhone
       ..devicePixelRatio = 3;
     addTearDown(tester.view.reset);
+    return services;
+  }
 
-    await tester.pumpWidget(MaterialApp(theme: buildTheme(), home: QuizPage(services: services, speaker: speaker)));
+  Future<void> settle(WidgetTester tester) async {
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(milliseconds: 20));
     }
+  }
+
+  testWidgets('repita esta frase: o microfone ouve, confere e mostra a pronúncia', (tester) async {
+    final services = await quizServices(tester);
+    final voice = FakeVoice()..script.add(['I love you']);
+    await tester.pumpWidget(MaterialApp(
+      theme: buildTheme(),
+      home: QuizPage(services: services, speaker: SilentSpeaker(), voice: voice, speakShare: 1),
+    ));
+    await settle(tester);
+    expect(find.text('Repita esta frase:'), findsOneWidget);
+    expect(find.text('NÃO POSSO FALAR AGORA'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Falar'));
+    await settle(tester);
+    expect(find.text('Pronúncia perfeita!'), findsOneWidget);
+    expect(find.text('Significa: Eu te amo'), findsOneWidget);
+    expect(find.text('Pronúncia: 100%'), findsOneWidget);
+
+    await tester.tap(find.text('CONTINUAR'));
+    await settle(tester);
+    expect(find.text('Repita esta frase:'), findsOneWidget);
+    await tester.tap(find.text('NÃO POSSO FALAR AGORA'));
+    await tester.pump();
+    expect(find.text('Traduza esta frase:'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('tela do quiz: lê a frase, monta com as fichas, confere e continua', (tester) async {
+    final services = await quizServices(tester);
+    final speaker = SilentSpeaker();
+
+    await tester.pumpWidget(MaterialApp(
+      theme: buildTheme(),
+      home: QuizPage(services: services, speaker: speaker, voice: FakeVoice(), speakShare: 0),
+    ));
+    await settle(tester);
     expect(find.text('Traduza esta frase:'), findsOneWidget);
     expect(find.text('PALAVRA FREQUENTE Nº 1'), findsOneWidget);
     expect(find.text('"you" aparece 99 vezes nas suas legendas'), findsOneWidget);
@@ -132,6 +347,54 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('PALAVRA FREQUENTE Nº 2'), findsOneWidget);
     expect(speaker.said, ['I love you', 'my dad']);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('arquivar pergunta antes; Cancelar não arquiva', (tester) async {
+    final fake = FakeApi()..quizItems = List.of(sampleQuiz);
+    final services = await quizServices(tester, api: fake);
+    await tester.pumpWidget(MaterialApp(
+      theme: buildTheme(),
+      home: QuizPage(services: services, speaker: SilentSpeaker(), voice: FakeVoice(), speakShare: 0),
+    ));
+    await settle(tester);
+
+    await tester.tap(find.byTooltip('Arquivar esta frase'));
+    await settle(tester);
+    expect(find.text('Arquivar esta frase?'), findsOneWidget);
+    expect(find.textContaining('“I love you”'), findsOneWidget);
+    await tester.tap(find.text('Cancelar'));
+    await settle(tester);
+    expect(fake.archived, isEmpty);
+    expect(find.text('PALAVRA FREQUENTE Nº 1'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Arquivar esta frase'));
+    await settle(tester);
+    await tester.tap(find.text('Arquivar'));
+    await settle(tester);
+    expect(fake.archived, {100});
+    expect(find.text('PALAVRA FREQUENTE Nº 2'), findsOneWidget);
+    expect(find.text('Frase arquivada: ela não aparece mais nas lições.'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('frases arquivadas: a lista e restaurar', (tester) async {
+    final fake = FakeApi()
+      ..quizItems = List.of(sampleQuiz)
+      ..archived.addAll({100, 300});
+    final services = await quizServices(tester, api: fake);
+    await tester.pumpWidget(MaterialApp(theme: buildTheme(), home: ArchivedPage(services: services)));
+    await settle(tester);
+    expect(find.textContaining('2 frases ficam fora das lições'), findsOneWidget);
+    expect(find.text('I love you'), findsOneWidget);
+    expect(find.text('my dog'), findsOneWidget);
+    expect(find.text('Vídeo A · arquivada em 22/11/2026'), findsNWidgets(2));
+
+    await tester.tap(find.text('Restaurar').first);
+    await settle(tester);
+    expect(fake.archived, {300});
+    expect(find.text('I love you'), findsNothing);
+    expect(find.text('Frase restaurada: ela volta a aparecer nas lições.'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
 }

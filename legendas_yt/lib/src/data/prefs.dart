@@ -43,7 +43,7 @@ class Prefs extends ChangeNotifier {
 
   ShowMode get show => ShowMode.parse(_data['show']);
 
-  /// Onde o quiz "Formar frases" parou: a próxima frase (de 0).
+  /// Onde as lições pararam: a próxima frase (de 0).
   int get quizPos {
     final v = _data['quizPos'];
     return v is int && v > 0 ? v : 0;

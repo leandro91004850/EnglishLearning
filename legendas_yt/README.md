@@ -1,14 +1,16 @@
 # Legendas YT (Flutter)
 
 Inglês com os vídeos que você assiste: legendas de vídeos do YouTube com tradução em tempo real
-(português ⇄ inglês) e um quiz para formar frases com as falas desses vídeos.
+(português ⇄ inglês) e lições, como no Duolingo, com as falas desses vídeos.
 
 O app abre num menu com três caminhos:
 
 - **Vídeos**: o vídeo num player do YouTube com a fala original e a tradução, no tempo do vídeo —
   sobre o vídeo e numa lista de falas que acompanha o vídeo (tocar numa fala leva o vídeo até ela).
-- **Formar frases**: "Traduza esta frase", como no Duolingo. Uma frase em inglês das suas legendas e a
-  tradução para montar com as fichas, das palavras que mais aparecem nas legendas para as que menos.
+- **Lições**: exercícios sorteados, como no Duolingo, com as frases em inglês das suas legendas, das
+  palavras que mais aparecem nas legendas para as que menos: **Traduza esta frase** (montar a tradução
+  com as fichas) e **Repita esta frase** (falar a frase; o reconhecimento de voz do aparelho confere a
+  pronúncia).
 - **Palavras mais usadas**: o ranking das palavras em inglês das suas legendas; tocar numa abre o quiz
   na frase dela.
 
@@ -46,9 +48,11 @@ precisariam de outro pacote de WebView.)
 | `lib/src/app/session.dart`: abre o vídeo na API e pergunta pelo andamento da legenda, avisa onde o vídeo está | `legendas_api/servico.py`: busca a legenda (banco ou YouTube) e traduz em lotes, começando pelo trecho onde o vídeo está |
 | `lib/src/data/history.dart`: a lista de vídeos na tela; manda a nova ordem e onde cada vídeo parou | a lista no banco, com todos os vídeos |
 | `lib/src/data/prefs.dart`: tamanho da legenda, o que mostrar e onde o quiz parou | tabela `preferencias` |
-| `lib/src/quiz/quiz_session.dart`: as lições do quiz, conferir a resposta, guardar onde parou | `GET /quiz`: `legendas_api/quiz.py` analisa as falas do banco e monta as frases com as fichas |
-| `lib/src/ui/quiz_page.dart`: a tela "Traduza esta frase"; `lib/src/quiz/speaker.dart`: a voz | — |
+| `lib/src/quiz/quiz_session.dart`: as lições: o sorteio dos exercícios, conferir a resposta, guardar onde parou | `GET /quiz`: `legendas_api/quiz.py` analisa as falas do banco e monta as frases com as fichas |
+| `lib/src/ui/quiz_page.dart`: a tela das lições ("Traduza" e "Repita esta frase"); `lib/src/quiz/speaker.dart`: a voz que lê a frase | — |
+| `lib/src/quiz/voice_input.dart`: o microfone (o reconhecimento de voz do aparelho); `lib/src/quiz/pronunciation.dart`: confere a pronúncia | — |
 | `lib/src/ui/words_page.dart`: o ranking das palavras | `GET /palavras` |
+| `lib/src/ui/archived_page.dart`: as frases arquivadas | `GET /frases/arquivadas`; arquivar e restaurar: `POST` e `DELETE /frases/{id}/arquivar` |
 | Diagnóstico | `GET /diagnostico`: testa o banco, os tradutores e as legendas do vídeo |
 | `lib/src/ui/`: o player do YouTube (uma página com base `http://localhost/`, sem servidor) e a interface | — |
 
@@ -68,18 +72,38 @@ precisariam de outro pacote de WebView.)
   vídeos, abaixo do status, com um ponto vermelho no ⋮; tocar no aviso abre Servidor. O vídeo toca, mas
   sem legenda.
 
-### Formar frases
+### Lições
 
 - A API passa por todas as falas guardadas no banco (com inglês e português) e conta quantas vezes
-  cada palavra em inglês aparece. O quiz vai da palavra que mais se repete para a que menos: para cada
-  palavra, uma frase curta com ela — a que mais se repete nas legendas (refrões, bordões). A palavra
-  vem destacada na frase, com quantas vezes ela aparece nas suas legendas.
-- A frase é lida em voz alta quando aparece (a voz em inglês do aparelho); o alto-falante lê de novo.
-- Monte a tradução tocando nas fichas, na ordem; tocar numa ficha da resposta devolve ela. Algumas
-  fichas sobram (palavras de outras frases). **VERIFICAR** confere (maiúsculas não contam) e, se errou,
-  mostra a solução certa.
-- Lições de 10 frases; a frase errada volta uma vez no fim da lição. **Ver no vídeo** abre o vídeo da
-  frase, no ponto dela.
+  cada palavra em inglês aparece. As lições vão da palavra que mais se repete para a que menos: para
+  cada palavra, uma frase curta com ela — a que mais se repete nas legendas (refrões, bordões). A
+  palavra vem destacada na frase, com quantas vezes ela aparece nas suas legendas.
+- Cada frase vira, por sorteio, um exercício: **Traduza esta frase** ou, em umas 3 de cada 10,
+  **Repita esta frase**. A frase é lida em voz alta quando aparece (a voz em inglês do aparelho); o
+  alto-falante lê de novo.
+- **Traduza esta frase**: monte a tradução tocando nas fichas, na ordem; tocar numa ficha da resposta
+  devolve ela. Algumas fichas sobram (palavras de outras frases). **VERIFICAR** confere (maiúsculas
+  não contam) e, se errou, mostra a solução certa.
+- **Repita esta frase**: toque no microfone e fale a frase em inglês. O aparelho para de ouvir quando
+  você para de falar (ou toque de novo) e mostra o que ouviu; na frase, as palavras ouvidas ficam
+  verdes e as que faltaram, vermelhas. Passa com 75% da frase; são 3 tentativas antes de contar como
+  errada.
+- A comparação perdoa o que não é erro de pronúncia: maiúsculas e pontuação, contrações ("I'm" = "I
+  am"), formas da fala ("gonna", "nothin'"), números ("2" = "two"), palavras que soam igual ("to",
+  "too", "two") e as interjeições das músicas ("oh", "la la"). Vale a transcrição mais parecida entre
+  as que o aparelho achou possíveis.
+- O reconhecimento de voz é o do próprio aparelho (o da Apple no iPhone e no Mac, o do Google no
+  Android), pelo plugin `speech_to_text`: gratuito e sem chave. Na primeira vez, o aparelho pede
+  permissão para o microfone e para o reconhecimento de voz. Ele pode precisar de internet (o aparelho
+  decide se reconhece nele mesmo ou no servidor da Apple ou do Google).
+- **NÃO POSSO FALAR AGORA**: a frase vira "Traduza", e as lições ficam sem falar por 15 minutos. Sem
+  permissão do microfone, as lições seguem só com "Traduza".
+- Lições de 10 frases; a frase errada volta uma vez no fim da lição, no mesmo exercício. **Ver no
+  vídeo** abre o vídeo da frase, no ponto dela.
+- **Arquivar**: o ícone de arquivo ao lado de "Palavra frequente" tira das lições uma frase que você
+  não quer fazer, depois de confirmar ("Arquivar esta frase?"). Ela não aparece mais, nem no fim da
+  lição, e a lição segue para a próxima frase. As arquivadas ficam em **frases arquivadas**, no
+  cartão Lições do menu: lá dá para ver o vídeo de cada uma e restaurá-la (ela volta para as lições).
 - Onde o quiz parou fica na API (preferência `quizPos`): a próxima lição começa dali, em qualquer
   aparelho. Praticar uma palavra escolhida no ranking não muda onde o quiz parou. Feitas todas as
   frases, dá para recomeçar do início; vídeos novos trazem frases novas.

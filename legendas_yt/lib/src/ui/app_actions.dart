@@ -29,8 +29,9 @@ void showAbout(BuildContext context) {
       SizedBox(height: 8),
       Text(
         'Abre o vídeo do YouTube e mostra, junto com o vídeo, a fala original e a tradução '
-        '(inglês ⇄ português). Em "Formar frases", você monta a tradução das frases dos seus vídeos, '
-        'das palavras que mais se repetem nas legendas para as que menos.\n\n'
+        '(inglês ⇄ português). Em "Lições", exercícios sorteados com as frases dos seus vídeos, das '
+        'palavras que mais se repetem nas legendas para as que menos: montar a tradução e repetir a '
+        'frase em voz alta (o reconhecimento de voz do aparelho, gratuito, confere a pronúncia).\n\n'
         'A legenda e a tradução vêm do servidor do Legendas YT (a API, em Servidor), que guarda '
         'tudo no banco de dados. Tradução: Google Tradutor gratuito; quando ele falha, a reserva '
         'MyMemory (até 5.000 caracteres por dia).\n\n'

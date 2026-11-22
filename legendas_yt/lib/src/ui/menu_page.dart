@@ -7,6 +7,7 @@ import '../api/api_client.dart';
 import '../app/services.dart';
 import '../core/text.dart';
 import 'app_actions.dart';
+import 'archived_page.dart';
 import 'home_page.dart';
 import 'quiz_page.dart';
 import 'words_page.dart';
@@ -15,7 +16,7 @@ const Color kVideosColor = Color(0xFFFF6A55);
 const Color kQuizColor = Color(0xFF93D333);
 const Color kWordsColor = Color(0xFF49C0F8);
 
-/// O menu inicial: Vídeos, Formar frases e Palavras mais usadas, com os números das suas legendas.
+/// O menu inicial: Vídeos, Lições e Palavras mais usadas, com os números das suas legendas.
 class MenuPage extends StatefulWidget {
   const MenuPage({super.key, required this.services});
 
@@ -29,6 +30,7 @@ class _MenuPageState extends State<MenuPage> {
   late final AppLifecycleListener _lifecycle;
   WordStats? _stats;
   QuizItem? _next; // a próxima frase do quiz
+  int _archived = 0; // frases arquivadas (fora das lições)
   bool _loading = true;
 
   AppServices get services => widget.services;
@@ -59,10 +61,12 @@ class _MenuPageState extends State<MenuPage> {
     await services.ready;
     WordStats? stats;
     QuizItem? next;
+    int? archived;
     try {
       stats = await services.api.words(count: 6);
       final batch = await services.api.quiz(start: services.prefs.quizPos, count: 1);
       next = batch.items.isEmpty ? null : batch.items.first;
+      archived = batch.archived;
     } on ApiFailure {
       // o aviso do servidor já aparece no alto do menu
     }
@@ -70,6 +74,7 @@ class _MenuPageState extends State<MenuPage> {
     setState(() {
       _stats = stats ?? _stats;
       _next = next;
+      _archived = archived ?? _archived;
       _loading = false;
     });
   }
@@ -153,10 +158,10 @@ class _MenuPageState extends State<MenuPage> {
                 ),
                 _MenuCard(
                   color: kQuizColor,
-                  icon: Icons.extension_rounded,
-                  title: 'Formar frases',
-                  text: 'Monte a tradução das frases dos seus vídeos, das palavras que mais aparecem nas '
-                      'legendas para as que menos.',
+                  icon: Icons.school_rounded,
+                  title: 'Lições',
+                  text: 'Exercícios sorteados com as frases dos seus vídeos: monte a tradução e repita em '
+                      'voz alta.',
                   footer: total == 0
                       ? null
                       : Column(
@@ -191,6 +196,19 @@ class _MenuPageState extends State<MenuPage> {
                                 backgroundColor: kQuizColor.withValues(alpha: 0.15),
                               ),
                             ),
+                            if (_archived > 0)
+                              TextButton.icon(
+                                onPressed: () => _go(ArchivedPage(services: services)),
+                                style: TextButton.styleFrom(
+                                  foregroundColor: kQuizColor,
+                                  padding: EdgeInsets.zero,
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                icon: const Icon(Icons.archive_outlined, size: 18),
+                                label: Text(
+                                  _archived == 1 ? '1 frase arquivada' : '${thousands(_archived)} frases arquivadas',
+                                ),
+                              ),
                           ],
                         ),
                   onTap: () => _go(QuizPage(services: services)),

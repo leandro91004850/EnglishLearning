@@ -1,12 +1,15 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
 
 import '../api/api_client.dart';
 import '../app/services.dart';
 import '../core/text.dart';
+import '../quiz/pronunciation.dart';
 import '../quiz/quiz_session.dart';
 import '../quiz/speaker.dart';
+import '../quiz/voice_input.dart';
 import '../youtube/video_id.dart';
 import 'home_page.dart';
 import 'theme.dart';
@@ -16,15 +19,26 @@ const Color kQuizGreenDark = Color(0xFF14240A);
 const Color kQuizRed = Color(0xFFFF5A5A);
 const Color kQuizPurple = Color(0xFFCE82FF);
 const Color kQuizBlue = Color(0xFF49C0F8);
+const Color kQuizBlueDark = Color(0xFF1C8FC4);
+const Color kQuizBlueDeep = Color(0xFF0F2A38);
+const Color kQuizOrange = Color(0xFFFF9600);
 const Color kTileBorder = Color(0xFF3A3A42);
 
 final RegExp _notWord = RegExp(r"[^\p{L}'’\-]", unicode: true);
 
-/// "Formar frases": traduzir a frase em inglês montando a tradução com as fichas, como no
-/// Duolingo. As frases vêm das legendas do banco, das palavras que mais se repetem para as que
-/// menos. [startAt]: praticar a partir de uma palavra escolhida (sem mudar onde o quiz parou).
+/// As lições, como no Duolingo: exercícios sorteados com as frases das legendas do banco, das
+/// palavras que mais se repetem para as que menos — "Traduza esta frase" (montar a tradução com
+/// as fichas) e "Repita esta frase" (falar; o reconhecimento de voz do aparelho confere a
+/// pronúncia). [startAt]: praticar a partir de uma palavra escolhida (sem mudar onde o quiz parou).
 class QuizPage extends StatefulWidget {
-  const QuizPage({super.key, required this.services, this.startAt, this.speaker});
+  const QuizPage({
+    super.key,
+    required this.services,
+    this.startAt,
+    this.speaker,
+    this.voice,
+    this.speakShare = QuizSession.defaultSpeakShare,
+  });
 
   final AppServices services;
   final int? startAt;
@@ -32,14 +46,25 @@ class QuizPage extends StatefulWidget {
   /// A voz que lê a frase (os testes passam uma muda).
   final Speaker? speaker;
 
+  /// O microfone (sem ele, o do aparelho; os testes passam um de mentira).
+  final VoiceInput? voice;
+
+  /// A parte das frases que vira exercício de falar.
+  final double speakShare;
+
   @override
   State<QuizPage> createState() => _QuizPageState();
 }
 
 class _QuizPageState extends State<QuizPage> {
-  late final QuizSession quiz = QuizSession(api: widget.services.api, prefs: widget.services.prefs);
+  late final QuizSession quiz = QuizSession(
+    api: widget.services.api,
+    prefs: widget.services.prefs,
+    voice: widget.voice ?? DeviceVoiceInput.instance,
+    speakShare: widget.speakShare,
+  );
   late final Speaker speaker = widget.speaker ?? DeviceSpeaker();
-  (int, int)? _spoken; // (lição, frase) já lida em voz alta
+  int? _spoken; // a frase (QuizSession.turn) já lida em voz alta
 
   @override
   void initState() {
@@ -59,13 +84,52 @@ class _QuizPageState extends State<QuizPage> {
   /// Cada frase nova é lida uma vez, como no Duolingo.
   void _readAloud() {
     final item = quiz.current;
-    final key = (quiz.lessons, quiz.step);
-    if (item == null || quiz.loading || quiz.correct != null || key == _spoken) return;
-    _spoken = key;
+    if (item == null || quiz.loading || quiz.correct != null || quiz.turn == _spoken) return;
+    _spoken = quiz.turn;
     unawaited(speaker.say(item.phrase));
   }
 
+  /// Arquivar a frase (ela não aparece mais nas lições), depois de confirmar.
+  Future<void> _archive(QuizItem item) async {
+    quiz.cancelListening();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        icon: const Icon(Icons.archive_outlined),
+        title: const Text('Arquivar esta frase?'),
+        content: Text(
+          '“${item.phrase}”\n\nEla não vai mais aparecer nas lições. Para trazê-la de volta, use '
+          '"frases arquivadas" no cartão Lições do menu.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Arquivar')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    unawaited(speaker.stop());
+    final messenger = ScaffoldMessenger.of(context);
+    if (await quiz.archiveCurrent()) {
+      messenger.showSnackBar(const SnackBar(content: Text('Frase arquivada: ela não aparece mais nas lições.')));
+    }
+  }
+
+  /// Ouvir a frase de novo (o microfone desliga, para não ouvir a própria voz do aparelho).
+  Future<void> _say(String text) async {
+    quiz.cancelListening();
+    await speaker.say(text);
+  }
+
+  /// O botão do microfone: começa a ouvir, ou termina e confere.
+  Future<void> _mic() async {
+    if (quiz.listening) return quiz.stopListening();
+    await speaker.stop();
+    await quiz.listen();
+  }
+
   void _openVideo(QuizItem item) {
+    quiz.cancelListening();
     unawaited(speaker.stop());
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => HomePage(services: widget.services, startVideo: item.videoId, startAt: item.start),
@@ -118,7 +182,7 @@ class _QuizPageState extends State<QuizPage> {
                 onSecondary: () => Navigator.of(context).maybePop(),
               );
             } else {
-              body = _Question(quiz: quiz, onSpeak: speaker.say, onOpenVideo: _openVideo);
+              body = _Question(quiz: quiz, onSpeak: _say, onMic: _mic, onOpenVideo: _openVideo, onArchive: _archive);
             }
             return Column(
               children: [
@@ -180,17 +244,27 @@ class _Header extends StatelessWidget {
 }
 
 class _Question extends StatelessWidget {
-  const _Question({required this.quiz, required this.onSpeak, required this.onOpenVideo});
+  const _Question({
+    required this.quiz,
+    required this.onSpeak,
+    required this.onMic,
+    required this.onOpenVideo,
+    required this.onArchive,
+  });
 
   final QuizSession quiz;
   final Future<void> Function(String) onSpeak;
+  final VoidCallback onMic;
   final ValueChanged<QuizItem> onOpenVideo;
+  final ValueChanged<QuizItem> onArchive;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final item = quiz.current!;
     final checked = quiz.correct != null;
+    final speaking = quiz.exercise == Exercise.speak;
+    final check = quiz.speech;
     return Column(
       children: [
         Expanded(
@@ -203,73 +277,291 @@ class _Question extends StatelessWidget {
                   children: [
                     const Icon(Icons.auto_awesome, color: kQuizPurple, size: 20),
                     const SizedBox(width: 8),
-                    Text(
-                      'PALAVRA FREQUENTE Nº ${thousands(item.position)}',
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        color: kQuizPurple,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.6,
+                    Expanded(
+                      child: Text(
+                        'PALAVRA FREQUENTE Nº ${thousands(item.position)}',
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          color: kQuizPurple,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.6,
+                        ),
                       ),
                     ),
+                    if (quiz.archiving)
+                      const SizedBox.square(dimension: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                    else
+                      IconButton(
+                        tooltip: 'Arquivar esta frase',
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => onArchive(item),
+                        icon: Icon(Icons.archive_outlined, color: theme.colorScheme.onSurfaceVariant),
+                      ),
                   ],
                 ),
                 const SizedBox(height: 12),
-                Text('Traduza esta frase:', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+                Text(
+                  speaking ? 'Repita esta frase:' : 'Traduza esta frase:',
+                  style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
                 const SizedBox(height: 20),
-                _Speech(item: item, onSpeak: () => onSpeak(item.phrase)),
+                _Speech(item: item, onSpeak: () => onSpeak(item.phrase), marks: speaking ? check?.words : null),
                 const SizedBox(height: 10),
                 Text(
                   '"${item.word}" aparece ${thousands(item.times)} vezes nas suas legendas',
                   style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                 ),
-                const SizedBox(height: 22),
-                _AnswerArea(
-                  tiles: [for (final i in quiz.picked) (i, item.tiles[i])],
-                  onTap: checked ? null : quiz.unpick,
-                ),
-                const SizedBox(height: 30),
-                _Bank(tiles: item.tiles, used: quiz.picked.toSet(), onTap: checked ? null : quiz.pick),
+                if (quiz.note.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  _Note(text: quiz.note),
+                ],
+                if (speaking) ...[
+                  const SizedBox(height: 24),
+                  _Hearing(listening: quiz.listening, text: quiz.hearing),
+                ] else ...[
+                  const SizedBox(height: 22),
+                  _AnswerArea(
+                    tiles: [for (final i in quiz.picked) (i, item.tiles[i])],
+                    onTap: checked ? null : quiz.unpick,
+                  ),
+                  const SizedBox(height: 30),
+                  _Bank(tiles: item.tiles, used: quiz.picked.toSet(), onTap: checked ? null : quiz.pick),
+                ],
               ],
             ),
           ),
         ),
-        if (!checked)
+        if (checked)
+          _Feedback(
+            correct: quiz.correct!,
+            item: item,
+            title: quiz.correct!
+                ? (speaking && check?.percent == 100 ? 'Pronúncia perfeita!' : 'Muito bem!')
+                : (speaking ? 'Ouvi outra coisa:' : 'Solução correta:'),
+            text: !speaking
+                ? item.translation
+                : quiz.correct!
+                    ? 'Significa: ${item.translation}'
+                    : '“${quiz.hearing}”',
+            details: [
+              if (speaking) 'Pronúncia: ${check?.percent ?? 0}%',
+              if (!quiz.correct!) 'Esta frase volta no fim da lição.',
+            ],
+            onContinue: quiz.next,
+            onOpenVideo: () => onOpenVideo(item),
+          )
+        else if (speaking)
+          _SpeakControls(listening: quiz.listening, level: quiz.level, onMic: onMic, onCantSpeak: quiz.cantSpeakNow)
+        else
           _BottomButton(
             label: 'VERIFICAR',
             color: kQuizGreen,
             onPressed: quiz.canCheck ? quiz.check : null,
-          )
-        else
-          _Feedback(
-            correct: quiz.correct!,
-            item: item,
-            onContinue: quiz.next,
-            onOpenVideo: () => onOpenVideo(item),
           ),
       ],
     );
   }
 }
 
-/// O "personagem" é o próprio vídeo da frase, falando no balão.
+/// Um aviso com a frase: nada ouvido, "fale de novo", sem microfone.
+class _Note extends StatelessWidget {
+  const _Note({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.info_outline_rounded, color: kQuizOrange, size: 20),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(text, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: kQuizOrange)),
+        ),
+      ],
+    );
+  }
+}
+
+/// O que o aparelho está ouvindo (e, depois, o que ouviu).
+class _Hearing extends StatelessWidget {
+  const _Hearing({required this.listening, required this.text});
+
+  final bool listening;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!listening && text.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+      decoration: BoxDecoration(
+        color: kPanel,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kTileBorder, width: 2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            listening ? 'OUVINDO…' : 'OUVI',
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: kQuizBlue,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(text.isEmpty ? '…' : '“$text”', style: theme.textTheme.titleMedium),
+        ],
+      ),
+    );
+  }
+}
+
+/// O microfone grande e o "não posso falar agora", como no Duolingo.
+class _SpeakControls extends StatelessWidget {
+  const _SpeakControls({required this.listening, required this.level, required this.onMic, required this.onCantSpeak});
+
+  final bool listening;
+  final ValueListenable<double> level;
+  final VoidCallback onMic;
+  final VoidCallback onCantSpeak;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 6),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _MicButton(listening: listening, level: level, onTap: onMic),
+          const SizedBox(height: 10),
+          Text(
+            listening ? 'Ouvindo… toque para terminar' : 'Toque no microfone e fale a frase',
+            style: theme.textTheme.bodySmall?.copyWith(color: muted),
+          ),
+          const SizedBox(height: 4),
+          TextButton(
+            onPressed: onCantSpeak,
+            style: TextButton.styleFrom(foregroundColor: muted),
+            child: const Text(
+              'NÃO POSSO FALAR AGORA',
+              style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MicButton extends StatelessWidget {
+  const _MicButton({required this.listening, required this.level, required this.onTap});
+
+  final bool listening;
+  final ValueListenable<double> level;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: listening ? 'Parar de ouvir' : 'Falar',
+      child: Semantics(
+        button: true,
+        child: GestureDetector(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 280),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              width: double.infinity,
+              height: 80,
+              decoration: BoxDecoration(
+                color: listening ? kQuizBlueDeep : kQuizBlue,
+                borderRadius: BorderRadius.circular(18),
+                border: listening ? Border.all(color: kQuizBlue, width: 2) : null,
+                // em relevo (a base mais escura embaixo); ouvindo, fica "afundado"
+                boxShadow: listening ? null : const [BoxShadow(color: kQuizBlueDark, offset: Offset(0, 5))],
+              ),
+              child: Center(
+                child: listening
+                    ? _LevelBars(level: level)
+                    : const Icon(Icons.mic_rounded, size: 40, color: Colors.white),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Barrinhas que sobem com a voz, enquanto o aparelho ouve.
+class _LevelBars extends StatelessWidget {
+  const _LevelBars({required this.level});
+
+  final ValueListenable<double> level;
+
+  static const List<double> _shape = [0.45, 0.75, 1, 0.75, 0.45];
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<double>(
+      valueListenable: level,
+      builder: (context, value, _) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final k in _shape)
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 90),
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              width: 7,
+              height: 8 + 36 * k * value,
+              decoration: BoxDecoration(color: kQuizBlue, borderRadius: BorderRadius.circular(4)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// O "personagem" é o próprio vídeo da frase, falando no balão. Depois de falar a frase, cada
+/// palavra fica verde (o aparelho ouviu) ou vermelha (não ouviu) — [marks].
 class _Speech extends StatelessWidget {
-  const _Speech({required this.item, required this.onSpeak});
+  const _Speech({required this.item, required this.onSpeak, this.marks});
 
   final QuizItem item;
   final VoidCallback onSpeak;
+  final List<SpokenWord>? marks;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final base = theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w500, height: 1.5) ?? const TextStyle();
+    final tokens = item.phrase.split(' ');
+    final marks = this.marks?.length == tokens.length ? this.marks : null;
     final spans = <InlineSpan>[];
-    for (final (i, token) in item.phrase.split(' ').indexed) {
+    for (final (i, token) in tokens.indexed) {
       if (i > 0) spans.add(const TextSpan(text: ' '));
       final word = token.toLowerCase().replaceAll(_notWord, '').replaceAll('’', "'");
       final highlight = word == item.word;
+      final heard = marks?[i].heard;
       spans.add(TextSpan(
         text: token,
-        style: highlight
+        style: heard != null
+            ? base.copyWith(
+                color: heard ? kQuizGreen : kQuizRed,
+                fontWeight: FontWeight.w700,
+                decoration: heard ? TextDecoration.none : TextDecoration.underline,
+                decorationStyle: TextDecorationStyle.wavy,
+                decorationColor: kQuizRed,
+              )
+            : highlight
             ? base.copyWith(
                 color: kQuizPurple,
                 fontWeight: FontWeight.w800,
@@ -495,12 +787,24 @@ class _BottomButton extends StatelessWidget {
   }
 }
 
-/// Acertou ou errou: a resposta certa, o vídeo da frase e o botão de continuar.
+/// Acertou ou errou: a resposta certa (ou o que foi ouvido), o vídeo da frase e o botão de
+/// continuar.
 class _Feedback extends StatelessWidget {
-  const _Feedback({required this.correct, required this.item, required this.onContinue, required this.onOpenVideo});
+  const _Feedback({
+    required this.correct,
+    required this.item,
+    required this.title,
+    required this.text,
+    this.details = const [],
+    required this.onContinue,
+    required this.onOpenVideo,
+  });
 
   final bool correct;
   final QuizItem item;
+  final String title;
+  final String text;
+  final List<String> details;
   final VoidCallback onContinue;
   final VoidCallback onOpenVideo;
 
@@ -524,20 +828,19 @@ class _Feedback extends StatelessWidget {
                   children: [
                     Icon(correct ? Icons.check_circle_rounded : Icons.cancel_rounded, color: color, size: 28),
                     const SizedBox(width: 8),
-                    Text(
-                      correct ? 'Muito bem!' : 'Solução correta:',
-                      style: theme.textTheme.titleLarge?.copyWith(color: color, fontWeight: FontWeight.w800),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: theme.textTheme.titleLarge?.copyWith(color: color, fontWeight: FontWeight.w800),
+                      ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 6),
-                Text(item.translation, style: theme.textTheme.titleMedium?.copyWith(color: color)),
-                if (!correct) ...[
+                Text(text, style: theme.textTheme.titleMedium?.copyWith(color: color)),
+                for (final line in details) ...[
                   const SizedBox(height: 2),
-                  Text(
-                    'Esta frase volta no fim da lição.',
-                    style: theme.textTheme.bodySmall?.copyWith(color: color.withValues(alpha: 0.85)),
-                  ),
+                  Text(line, style: theme.textTheme.bodySmall?.copyWith(color: color.withValues(alpha: 0.85))),
                 ],
                 if (item.videoId.isNotEmpty)
                   Align(

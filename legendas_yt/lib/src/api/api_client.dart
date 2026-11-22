@@ -125,10 +125,11 @@ class JobState {
   final int total;
 }
 
-/// Uma frase do quiz "Formar frases": a frase em inglês para traduzir, montando a tradução com as
-/// fichas. Vem das legendas do banco, pela ordem das palavras que mais se repetem nelas.
+/// Uma frase das lições: a frase em inglês para traduzir montando a tradução com as fichas, ou para repetir
+/// em voz alta. Vem das legendas do banco, pela ordem das palavras que mais se repetem nelas.
 class QuizItem {
   const QuizItem({
+    this.id = 0,
     required this.position,
     required this.word,
     required this.times,
@@ -147,6 +148,7 @@ class QuizItem {
     final video = json['video'] is Map ? json['video'] as Map : const {};
     num number(Object? v) => v is num ? v : 0;
     return QuizItem(
+      id: number(json['id']).toInt(),
       position: number(json['posicao']).toInt(),
       word: '${json['palavra'] ?? ''}',
       times: number(json['vezes']).toInt(),
@@ -160,6 +162,9 @@ class QuizItem {
       start: number(video['inicio']).toDouble(),
     );
   }
+
+  /// O id da frase no banco (é por ele que ela é arquivada).
+  final int id;
 
   /// Posição no quiz (de 1): a ordem das palavras, da que mais se repete.
   final int position;
@@ -188,7 +193,14 @@ class QuizItem {
 }
 
 class QuizBatch {
-  const QuizBatch({required this.items, required this.total, required this.phrases, required this.words, required this.dbMessage});
+  const QuizBatch({
+    required this.items,
+    required this.total,
+    required this.phrases,
+    required this.words,
+    required this.dbMessage,
+    this.archived = 0,
+  });
 
   factory QuizBatch.fromJson(Map<String, dynamic> json) => QuizBatch(
         items: [
@@ -199,7 +211,11 @@ class QuizBatch {
         phrases: json['frases'] is int ? json['frases'] as int : 0,
         words: json['palavras'] is int ? json['palavras'] as int : 0,
         dbMessage: '${json['banco'] ?? ''}',
+        archived: json['arquivadas'] is int ? json['arquivadas'] as int : 0,
       );
+
+  /// Quantas frases estão arquivadas (fora das lições).
+  final int archived;
 
   final List<QuizItem> items;
 
@@ -258,6 +274,40 @@ class WordStats {
   final String dbMessage;
 }
 
+/// Uma frase arquivada: ela não aparece mais nas lições.
+class ArchivedPhrase {
+  const ArchivedPhrase({
+    required this.id,
+    required this.phrase,
+    required this.translation,
+    required this.videoId,
+    required this.videoTitle,
+    required this.start,
+    required this.archivedAt,
+  });
+
+  factory ArchivedPhrase.fromJson(Map<String, dynamic> json) {
+    final video = json['video'] is Map ? json['video'] as Map : const {};
+    return ArchivedPhrase(
+      id: json['id'] is int ? json['id'] as int : 0,
+      phrase: '${json['frase'] ?? ''}',
+      translation: '${json['traducao'] ?? ''}',
+      videoId: '${video['id'] ?? ''}',
+      videoTitle: '${video['titulo'] ?? ''}',
+      start: video['inicio'] is num ? (video['inicio'] as num).toDouble() : 0,
+      archivedAt: DateTime.tryParse('${json['arquivada_em'] ?? ''}'),
+    );
+  }
+
+  final int id;
+  final String phrase;
+  final String translation;
+  final String videoId;
+  final String videoTitle;
+  final double start;
+  final DateTime? archivedAt;
+}
+
 class ApiClient {
   ApiClient(this._http, this.settings, {this.mobile = false});
 
@@ -313,6 +363,23 @@ class ApiClient {
   /// As palavras em inglês que mais se repetem nas legendas do banco.
   Future<WordStats> words({int count = 100}) async =>
       WordStats.fromJson(await _call('GET', '/palavras', query: {'quantidade': '$count'}, timeout: diagnoseTimeout));
+
+  /// Arquiva a frase [id]: ela não aparece mais nas lições.
+  Future<void> archive(int id) => _call('POST', '/frases/$id/arquivar');
+
+  /// A frase arquivada [id] volta para as lições.
+  Future<void> restore(int id) => _call('DELETE', '/frases/$id/arquivar');
+
+  /// As frases arquivadas, as mais recentes primeiro.
+  Future<List<ArchivedPhrase>> archived() async {
+    final r = await _call('GET', '/frases/arquivadas');
+    final message = '${r['banco'] ?? ''}';
+    if (message.isNotEmpty) throw ApiFailure(message);
+    return [
+      for (final f in r['frases'] as List? ?? const [])
+        if (f is Map<String, dynamic>) ArchivedPhrase.fromJson(f),
+    ];
+  }
 
   /// Testes no servidor: banco, tradutores e (com [url]) as legendas do YouTube.
   Future<(bool, List<String>)> diagnose(String? url) async {

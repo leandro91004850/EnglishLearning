@@ -28,6 +28,9 @@ class FakeApi {
   List<Map<String, Object?>> quizItems = [];
   List<Map<String, Object?>> wordStats = [];
 
+  /// Os ids das frases arquivadas (POST/DELETE /frases/{id}/arquivar): ficam fora do GET /quiz.
+  final Set<int> archived = {};
+
   /// Respostas de GET /legendas/{job}, uma por pergunta (a última se repete).
   List<Map<String, Object?>> jobStates = [jobState(finished: true, ready: true, message: 'pronto')];
   int _poll = 0;
@@ -75,10 +78,21 @@ class FakeApi {
         final start = int.parse(r.url.queryParameters['inicio'] ?? '0');
         final count = int.parse(r.url.queryParameters['quantidade'] ?? '10');
         return json({
-          'itens': quizItems.skip(start).take(count).toList(),
+          'itens': quizItems.skip(start).where((i) => !archived.contains(i['id'])).take(count).toList(),
           'total': quizItems.length,
           'frases': 100,
           'palavras': 50,
+          'arquivadas': archived.length,
+          'banco': dbMessage,
+        });
+      case ('GET', '/frases/arquivadas'):
+        return json({
+          'frases': [
+            for (final i in quizItems)
+              if (archived.contains(i['id']))
+                {'id': i['id'], 'frase': i['frase'], 'traducao': i['traducao'], 'arquivada_em': '2026-11-22T12:00:00', 'video': i['video']},
+          ],
+          'total': archived.length,
           'banco': dbMessage,
         });
       case ('GET', '/palavras'):
@@ -91,6 +105,12 @@ class FakeApi {
     }
     if (r.method == 'POST' && path.startsWith('/recentes/') && path.endsWith('/posicao')) {
       positions.add((path.split('/')[2], (body['pos'] as num).toDouble(), (body['dur'] as num).toDouble()));
+      return json({'ok': true});
+    }
+    if (path.startsWith('/frases/') && path.endsWith('/arquivar')) {
+      final id = int.parse(path.split('/')[2]);
+      if (!quizItems.any((i) => i['id'] == id)) return json({'detail': 'Frase não encontrada.'}, 404);
+      r.method == 'DELETE' ? archived.remove(id) : archived.add(id);
       return json({'ok': true});
     }
     if (r.method == 'POST' && path.startsWith('/legendas/') && path.endsWith('/foco')) {
@@ -158,6 +178,7 @@ Map<String, Object?> jobState({
 Map<String, Object?> quizItem(int position, String word, String phrase, String translation, List<String> answer,
         List<String> tiles) =>
     {
+      'id': position * 100,
       'posicao': position,
       'palavra': word,
       'vezes': 100 - position,

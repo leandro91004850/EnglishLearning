@@ -19,15 +19,18 @@ class DeviceSpeaker implements Speaker {
     final tts = FlutterTts();
     await tts.setLanguage('en-US');
     await tts.setSpeechRate(0.45);
-    if (Platform.isIOS) {
-      // toca mesmo com o iPhone no silencioso, como o vídeo
-      await tts.setSharedInstance(true);
-      await tts.setIosAudioCategory(
-        IosTextToSpeechAudioCategory.playback,
-        [IosTextToSpeechAudioCategoryOptions.mixWithOthers],
-      );
-    }
     return _tts = tts;
+  }
+
+  /// iPhone: toca mesmo no silencioso, como o vídeo. Refeito a cada frase, porque o microfone das
+  /// lições muda o áudio do aparelho enquanto ouve.
+  Future<void> _iosAudio(FlutterTts tts) async {
+    if (!Platform.isIOS) return;
+    await tts.setSharedInstance(true);
+    await tts.setIosAudioCategory(
+      IosTextToSpeechAudioCategory.playback,
+      [IosTextToSpeechAudioCategoryOptions.mixWithOthers],
+    );
   }
 
   @override
@@ -35,6 +38,7 @@ class DeviceSpeaker implements Speaker {
     try {
       final tts = await _ready();
       await tts.stop();
+      await _iosAudio(tts);
       await tts.speak(text);
     } catch (e) {
       Log.warning('Voz do quiz: $e');

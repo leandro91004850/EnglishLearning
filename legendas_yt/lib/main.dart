@@ -5,7 +5,7 @@ import 'src/ui/menu_page.dart';
 import 'src/ui/theme.dart';
 
 /// Legendas YT — legendas de vídeos do YouTube com tradução em tempo real (português ⇄ inglês)
-/// e o quiz "Formar frases" com as frases das legendas. Consumidor da API do Legendas YT.
+/// e as lições (exercícios com as frases das legendas). Consumidor da API do Legendas YT.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final services = await AppServices.create();

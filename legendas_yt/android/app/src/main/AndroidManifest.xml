@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- A API do Legendas YT (lista, legendas e tradução) e o player do YouTube. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- As lições: repetir a frase em voz alta (o reconhecimento de voz do aparelho). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <application
         android:label="Legendas YT"
         android:name="${applicationName}"
@@ -48,6 +50,10 @@
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
+        </intent>
+        <!-- O reconhecimento de voz do aparelho (speech_to_text). -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
         </intent>
     </queries>
 </manifest>
