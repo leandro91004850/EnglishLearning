@@ -41,6 +41,9 @@ flutter test                     # testes (sem internet e sem a API: uma API de 
 Plataformas: Android, iOS e macOS. (Web não dá: o player precisa de WebView. Windows/Linux
 precisariam de outro pacote de WebView.)
 
+**No seu iPhone** (sem App Store): os comandos para instalar e para renovar a assinatura — que, com a
+conta Apple gratuita, vence a cada 7 dias — estão em [INSTALAR_NO_IPHONE.md](INSTALAR_NO_IPHONE.md).
+
 ## Como funciona
 
 | No app | Na API |
